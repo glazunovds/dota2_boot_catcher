@@ -67,6 +67,14 @@ class Config:
     boot_search_bottom: float = 0.84   # ignore the cart band (cart trim moves too)
     boot_side_margin: float = 0.07     # ignore the animated claw/jester at edges
     boot_min_area: int = 15
+    # Shape/size gate (from a level-clearing boot's envelope, 336 frames: area
+    # p99=1105 max=1451, width p99=70, aspect max 2.67). Rejects NON-boot blobs
+    # that "largest blob" used to grab: brick clusters (~1696px, 66x32) and the
+    # aim-trajectory / UI lines (258x3, aspect ~80). The spinning boot stays
+    # compact so it passes, and rejecting the big/wide blobs stops the lock-ups.
+    boot_max_area: int = 1300
+    boot_max_aspect: float = 2.8
+    boot_max_w: int = 90
 
     # --- Boot TRACKER (ROI search + outlier gate, ported from the Rust bot) ---
     # Once locked, search only a box around the boot's predicted position; this

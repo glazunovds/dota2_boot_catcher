@@ -29,6 +29,7 @@ terminal run as Administrator to reach Dota.
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import os
 import sys
 import threading
@@ -133,22 +134,90 @@ class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+# --- SendInput plumbing: absolute virtual-desktop mouse. A synthetic click only
+# gives a game keyboard focus if it lands on the exact pixel and reads as a real
+# click; the old mouse_event (no ABSOLUTE flag, 30ms) left Dota active-looking
+# but focus-less, so the user had to click manually. SendInput with
+# ABSOLUTE|VIRTUALDESK coords + a real hold fixes that.
+_user32 = ctypes.windll.user32
+ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+INPUT_MOUSE = 0
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+class _INPUT(ctypes.Structure):
+    class _U(ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT)]
+    _anonymous_ = ("u",)
+    _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+
+_user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
+_user32.SendInput.restype = wintypes.UINT
+_user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+_user32.GetSystemMetrics.restype = ctypes.c_int
+_user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
+
+
 def cursor_pos():
     p = _POINT()
-    ctypes.windll.user32.GetCursorPos(ctypes.byref(p))
+    _user32.GetCursorPos(ctypes.byref(p))
     return (p.x, p.y)
 
 
+def _abs_coords(x, y):
+    """Map a virtual-desktop pixel to 0..65535 normalized coords (what
+    MOUSEEVENTF_ABSOLUTE|VIRTUALDESK expects, spanning ALL monitors)."""
+    gsm = _user32.GetSystemMetrics
+    vx, vy = gsm(SM_XVIRTUALSCREEN), gsm(SM_YVIRTUALSCREEN)
+    vw, vh = max(1, gsm(SM_CXVIRTUALSCREEN)), max(1, gsm(SM_CYVIRTUALSCREEN))
+    nx = max(0, min(65535, int(((x - vx) * 65535 + (vw - 1)) // vw)))
+    ny = max(0, min(65535, int(((y - vy) * 65535 + (vh - 1)) // vh)))
+    return nx, ny
+
+
+def _mk_mouse(flags, nx=0, ny=0):
+    inp = _INPUT()
+    inp.type = INPUT_MOUSE
+    inp.mi = _MOUSEINPUT(nx, ny, 0, flags, 0, 0)
+    return inp
+
+
+def _send(*inputs):
+    arr = (_INPUT * len(inputs))(*inputs)
+    return _user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT)) == len(inputs)
+
+
 def move_mouse(x, y):
-    ctypes.windll.user32.SetCursorPos(int(x), int(y))
+    nx, ny = _abs_coords(x, y)
+    if not _send(_mk_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny)):
+        _user32.SetCursorPos(int(x), int(y))
 
 
 def click_at(x, y):
-    move_mouse(x, y)
-    time.sleep(0.05)
-    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)   # left down
-    time.sleep(0.03)
-    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)   # left up
+    """Move to (x, y) and click via SendInput absolute virtual-desktop coords, so
+    the click lands on the exact pixel and Dota routes WM_MOUSEACTIVATE (real
+    keyboard focus). Caller re-asserts foreground ONCE afterward, so it doesn't
+    race/fight the click's own activation."""
+    nx, ny = _abs_coords(x, y)
+    move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    _send(_mk_mouse(move, nx, ny))
+    time.sleep(0.08)
+    _send(_mk_mouse(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny))
+    time.sleep(0.06)
+    _send(_mk_mouse(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny))
 
 
 def park_cursor():
@@ -175,9 +244,16 @@ def _init_win32():
     u.GetAncestor.restype = ctypes.c_void_p
     u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     u.GetForegroundWindow.restype = ctypes.c_void_p
+    u.GetForegroundWindow.argtypes = []
+    u.SetForegroundWindow.restype = wintypes.BOOL
     u.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+    u.BringWindowToTop.restype = wintypes.BOOL
     u.BringWindowToTop.argtypes = [ctypes.c_void_p]
-    u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    u.AttachThreadInput.restype = wintypes.BOOL
+    u.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    u.GetWindowThreadProcessId.restype = wintypes.DWORD
+    u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    ctypes.windll.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
     _win32_ready = True
 
 
@@ -195,27 +271,34 @@ def refresh_hwnd(region):
     return _hwnd
 
 
-def focus_game():
-    """Bring the game window to the foreground so key input lands on Dota."""
+def focus_game(tries=3):
+    """Bring the game window to the foreground so key input lands on Dota.
+    Retries because activation right after a synthetic click is async - the
+    window may not report foreground on the first check. Returns True if Dota
+    ends up foreground."""
     if not _hwnd:
-        return
+        return False
     u = ctypes.windll.user32
-    if u.GetForegroundWindow() == _hwnd:
-        return
-    cur = ctypes.windll.kernel32.GetCurrentThreadId()
-    tgt = u.GetWindowThreadProcessId(_hwnd, None)
-    fg = u.GetForegroundWindow()
-    fgt = u.GetWindowThreadProcessId(fg, None) if fg else 0
-    if fgt and fgt != cur:
-        u.AttachThreadInput(cur, fgt, True)
-    if tgt and tgt != cur:
-        u.AttachThreadInput(cur, tgt, True)
-    u.BringWindowToTop(_hwnd)
-    u.SetForegroundWindow(_hwnd)
-    if tgt and tgt != cur:
-        u.AttachThreadInput(cur, tgt, False)
-    if fgt and fgt != cur:
-        u.AttachThreadInput(cur, fgt, False)
+    for _ in range(tries):
+        if u.GetForegroundWindow() == _hwnd:
+            return True
+        cur = ctypes.windll.kernel32.GetCurrentThreadId()
+        tgt = u.GetWindowThreadProcessId(_hwnd, None)
+        fg = u.GetForegroundWindow()
+        fgt = u.GetWindowThreadProcessId(fg, None) if fg else 0
+        att_fg = att_tgt = False
+        if fgt and fgt != cur:
+            att_fg = bool(u.AttachThreadInput(cur, fgt, True))
+        if tgt and tgt != cur:
+            att_tgt = bool(u.AttachThreadInput(cur, tgt, True))
+        u.BringWindowToTop(_hwnd)
+        u.SetForegroundWindow(_hwnd)
+        if att_tgt:
+            u.AttachThreadInput(cur, tgt, False)
+        if att_fg:
+            u.AttachThreadInput(cur, fgt, False)
+        time.sleep(0.05)
+    return u.GetForegroundWindow() == _hwnd
 
 
 def focus_click(region):
@@ -225,11 +308,12 @@ def focus_click(region):
     (BOOTS/LEVEL/SCORE - not a button), then parks the cursor off-screen."""
     l, t, w, h = region
     x = int(l + w * 0.5)
-    y = int(t - h * 0.05)      # just above the field, inside the modal's HUD
+    y = int(t + h * 0.30)      # INSIDE the play field (harmless during menu/level)
     click_at(x, y)
-    time.sleep(0.08)
-    focus_game()
+    time.sleep(0.15)           # let the click activate Dota before re-asserting
+    ok = focus_game()
     park_cursor()
+    return ok
 
 
 # --------------------------------------------------------------------------- #
@@ -337,10 +421,10 @@ def click_play(region, cfg):
     l, t, w, h = region
     x, y = int(l + w * 0.5), int(t + h * cfg.play_button_yf)
     click_at(x, y)
-    time.sleep(0.1)
-    focus_game()
+    time.sleep(0.15)
+    ok = focus_game()
     park_cursor()
-    log(f"  clicked PLAY at ({x},{y})")
+    log(f"  clicked PLAY at ({x},{y}); foreground={'Dota' if ok else 'NOT Dota'}")
 
 
 def wait_ready(region, cfg):
@@ -642,8 +726,8 @@ def main_loop(cfg, verbose):
         return
     log(f"Field region (absolute): {tuple(int(v) for v in region)}")
     refresh_hwnd(region)
-    focus_click(region)                      # click Dota so keys land on it
-    log("Focused Dota via click.")
+    ok = focus_click(region)                 # click Dota so keys land on it
+    log(f"Focused Dota via click: foreground={'Dota' if ok else 'NOT Dota (may need manual click)'}")
     # If we're starting on a paused screen (desaturated), tap F9 to resume.
     s0 = detect.scene_saturation(grab_region(region))
     if s0 < cfg.sat_ended:

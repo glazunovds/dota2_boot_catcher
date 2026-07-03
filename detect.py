@@ -193,16 +193,23 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None):
         boot = keep
     boot = cv2.morphologyEx(boot, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, _, stats, cent = cv2.connectedComponentsWithStats(boot, 8)
-    best = None
+    passing = []
     for i in range(1, n):
-        area = stats[i][4]
-        if area < cfg.boot_min_area:
-            continue
-        if best is None or area > best[1]:
-            best = (cent[i], area)
-    if best is None:
+        _x, _y, bw, bh, area = stats[i]
+        if area < cfg.boot_min_area or area > cfg.boot_max_area:
+            continue                          # too small = noise, too big = brick cluster
+        asp = max(bw, bh) / max(1, min(bw, bh))
+        if asp > cfg.boot_max_aspect or bw > cfg.boot_max_w:
+            continue                          # wide/thin = aim-trajectory or UI line
+        passing.append((cent[i], int(area)))
+    if not passing:
         return None, gray
-    return (int(best[0][0]), int(best[0][1]), int(best[1])), gray
+    # Pick the LARGEST blob that passed the shape/size gate. Nearest-to-prediction
+    # selection was tried and reverted: it needs dense frames (60fps) for the
+    # linear prediction to be reliable; on this game's data it tracked WORSE. The
+    # gate (rejecting brick clusters / UI lines) is what fixes wrong-blob picks.
+    best = max(passing, key=lambda c: c[1])
+    return (int(best[0][0]), int(best[0][1]), best[1]), gray
 
 
 # --------------------------------------------------------------------------- #
