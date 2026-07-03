@@ -560,6 +560,7 @@ def wait_ready(region, cfg):
 
 
 def play_level(region, cfg, verbose):
+    bring_foreground()   # PostMessage keys only work when Dota is the active window
     # 1) optionally position the cart under the bricks. OFF by default: A/D only
     # moves the cart on the LOCK screen; on the THROW screen it rotates the aim,
     # and the two screens can't be told apart reliably, so positioning risks
@@ -628,28 +629,44 @@ def boot_in_flight(region, cfg, window=0.4):
     return (max(xs) - min(xs) > 25) or (max(ys) - min(ys) > 25)
 
 
+def bring_foreground():
+    """Best-effort: make Dota the ACTIVE/foreground window. PostMessage'd keys are
+    only processed by the minigame when its window is active (they were dropped in
+    a run where the terminal had focus). Keyboard focus is NOT needed - PostMessage
+    doesn't use it - so this can't hurt like the old focus dance did. From a
+    background process SetForegroundWindow is subject to the foreground-lock, so
+    it's best-effort; if keys still don't land, keep Dota in front manually."""
+    if not _hwnd:
+        return
+    u = ctypes.windll.user32
+    if u.GetForegroundWindow() == _hwnd:
+        return
+    cur = ctypes.windll.kernel32.GetCurrentThreadId()
+    fg = u.GetForegroundWindow()
+    fgt = u.GetWindowThreadProcessId(fg, None) if fg else 0
+    att = bool(u.AttachThreadInput(cur, fgt, True)) if (fgt and fgt != cur) else False
+    u.BringWindowToTop(_hwnd)
+    u.SetForegroundWindow(_hwnd)
+    if att:
+        u.AttachThreadInput(cur, fgt, False)
+
+
 def boot_launched(region, cfg, timeout):
-    """Confirm the throw by seeing a REAL boot in FLIGHT - a gated, boot-sized
-    blob that MOVES. Movement is the reliable signal: the on-cart boot is static
-    (undetected) and the aim-preview dots are gated (thin line) or too small, so
-    neither trips this, while the thrown boot is moving the instant it leaves the
-    cart. So the throw loop stops right after the throw (~2 presses) instead of
-    hammering Space into an already-airborne boot, and it no longer depends on
-    catching the fast boot at a specific height (which took 6 presses)."""
+    """Confirm a throw by watching for a launched boot risen HIGH into the field,
+    boot-sized, seen over frames. (Reverted from a movement-based check that made
+    it stricter.) Requiring height + area rejects the animating aim-preview dots;
+    if the boot isn't confirmed the loop just presses Space again."""
+    limit = int(region[3]) * cfg.launch_min_y
     prev = detect.to_gray(grab_region(region))
-    cut = int(region[3]) * cfg.boot_search_bottom
-    seen = []
     deadline = time.time() + timeout
+    hits = 0
     while running and time.time() < deadline:
         panel = grab_region(region)
         boot, prev = detect.find_boot(panel, prev, cfg)
-        if boot is not None and boot[2] >= cfg.launch_min_area and boot[1] < cut:
-            seen.append(boot)
-            if len(seen) >= 2:                        # a real flight travels
-                xs = [p[0] for p in seen]
-                ys = [p[1] for p in seen]
-                if (max(xs) - min(xs) > 25) or (max(ys) - min(ys) > 25):
-                    return True
+        if boot is not None and boot[1] < limit and boot[2] >= cfg.launch_min_area:
+            hits += 1
+            if hits >= cfg.launch_min_hits:
+                return True
         time.sleep(0.02)
     return False
 
@@ -862,12 +879,13 @@ def main_loop(cfg, verbose):
         return
     log(f"Field region (absolute): {tuple(int(v) for v in region)}")
     refresh_hwnd(region)
-    # A REAL click is the only thing that gives the Dota minigame KEYBOARD focus.
-    # Focus needs a REAL click on the GAME panel - but that panel only exists once
-    # a LEVEL is loaded (the intro/PLAY screen is a DIFFERENT panel, so clicking it
-    # focuses the wrong thing). So: auto-PLAY starts the level first, THEN we prompt
-    # for the click once the field is up. The prompt is in the loop below.
-    log("  (auto-clicking PLAY to load a level; you'll be asked to click the field)")
+    bring_foreground()
+    # Keys go via PostMessage (no keyboard focus needed), BUT Dota only processes
+    # them when its window is ACTIVE/foreground. The bot brings it to front best-
+    # effort; if keys don't land, keep Dota in front (alt-tab to it, don't switch
+    # to the terminal). No clicking required.
+    log("  >>> Keep the Dota window ACTIVE/in front (don't switch to this terminal)")
+    log("      - PostMessage keys only work when Dota is the foreground window. <<<")
     # If we're starting on a paused screen (desaturated), tap F9 to resume.
     s0 = detect.scene_saturation(grab_region(region))
     if s0 < cfg.sat_ended:
