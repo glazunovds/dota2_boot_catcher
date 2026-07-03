@@ -366,11 +366,9 @@ def focus_click(region):
     l, t, w, h = region
     x = int(l + w * 0.5)
     y = int(t + h * 0.30)      # INSIDE the play field (harmless during menu/level)
-    click_at(x, y)
-    time.sleep(0.15)           # let the click activate Dota before re-asserting
-    ok = focus_game()
+    click_at(x, y)             # (unused now; focus is set by the user's real click)
+    time.sleep(0.15)
     park_cursor()
-    return ok
 
 
 # --------------------------------------------------------------------------- #
@@ -429,7 +427,6 @@ def move_cart(region, target_x, cfg):
     fast, so if a few A/D pulses don't move it, we're not on the LOCK screen
     (A/D is rotating the aim, or the cart is locked) - stop immediately so we
     don't wreck the launch aim."""
-    focus_game()
     dead = cfg.move_deadzone_frac * int(region[2])
     deadline = time.time() + cfg.move_timeout
     last_cart = None
@@ -474,15 +471,18 @@ def do_aim(cfg):
 
 
 def click_play(region, cfg):
-    """Click the PLAY button (intro / end-of-run screen) to start a game."""
+    """Click the PLAY button (intro / end-of-run screen) to start a game.
+    Does NOT call focus_game(): its SetForegroundWindow/SetFocus dance can't give
+    real keyboard focus but CAN knock the user's manual focus loose (cursor jumps
+    away, keys stop landing). The synthetic click still presses the button; the
+    user's keyboard focus is left untouched."""
     l, t, w, h = region
     x, y = int(l + w * 0.5), int(t + h * cfg.play_button_yf)
     click_at(x, y)
     time.sleep(0.15)
-    ok = focus_game()
     park_cursor()
-    foc, act = keyboard_focus_state()
-    log(f"  clicked PLAY at ({x},{y}); foreground={'Dota' if ok else 'no'} kbFocus={foc}")
+    foc, _act = keyboard_focus_state()
+    log(f"  clicked PLAY at ({x},{y}); kbFocus={foc}")
 
 
 def wait_ready(region, cfg):
