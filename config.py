@@ -138,6 +138,10 @@ class Config:
     launch_min_hits: int = 1         # ...seen this many frames. 1 is enough now
                                      # that launch_min_y rejects the dots by height;
                                      # 2 made confirm slow -> 3 presses -> late catch
+    launch_min_area: int = 250       # ...and be a real boot-SIZED blob. A launched
+                                     # boot is ~400-700px; small brick/dot fragments
+                                     # (<250) were false-triggering the launch (then
+                                     # the catch ran on the aim screen and rotated it)
     unpause_f9: bool = False         # tap F9 if the field vanishes (pause popup)
     pause_none_secs: float = 2.0     # field missing this long => assume paused
 

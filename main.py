@@ -522,8 +522,8 @@ def boot_launched(region, cfg, timeout):
     while running and time.time() < deadline:
         panel = grab_region(region)
         boot, prev = detect.find_boot(panel, prev, cfg)
-        if boot is not None and boot[1] < limit:      # high in the brick field
-            hits += 1
+        if boot is not None and boot[1] < limit and boot[2] >= cfg.launch_min_area:
+            hits += 1                                 # high in the field AND boot-sized
             if hits >= cfg.launch_min_hits:
                 return True
         time.sleep(0.02)
