@@ -537,6 +537,13 @@ def play_level(region, cfg, verbose):
         # don't lock/throw into a loading screen.
         log(f"  aborting boot: scene changed (sat={s:.0f})")
         return
+    # 1.5) If a boot is ALREADY airborne (the game auto-served, or one carried
+    # over from a just-cleared level), pressing Space mis-fires the throw - skip
+    # straight to catching it. (This is the 'Space while boot midair' case.)
+    if boot_in_flight(region, cfg):
+        log("  boot already airborne - catching without a throw")
+        catch_phase(region, cfg)
+        return
     # 2) lock + throw: press Space until the boot actually launches. This one
     # loop covers the normal lock->throw pair AND the case (common on the first
     # boot after PLAY) where a press gets eaten during the level fade-in.
@@ -558,6 +565,28 @@ def play_level(region, cfg, verbose):
 
     # 3) catch phase: follow the boot with the cart until it's gone
     catch_phase(region, cfg)
+
+
+def boot_in_flight(region, cfg, window=0.4):
+    """True if a REAL boot is already airborne and MOVING - so the bot should NOT
+    press Space to throw. Requires a gated, boot-sized (>=launch_min_area) blob
+    that actually TRAVELS over the window. The on-cart boot is static (no motion
+    -> undetected) and the aim dots are gated/too-small, so neither trips this."""
+    prev = detect.to_gray(grab_region(region))
+    cut = int(region[3]) * cfg.boot_search_bottom
+    seen = []
+    end = time.time() + window
+    while running and time.time() < end:
+        panel = grab_region(region)
+        boot, prev = detect.find_boot(panel, prev, cfg)
+        if boot is not None and boot[2] >= cfg.launch_min_area and boot[1] < cut:
+            seen.append(boot)
+        time.sleep(0.03)
+    if len(seen) < 3:
+        return False
+    xs = [p[0] for p in seen]
+    ys = [p[1] for p in seen]
+    return (max(xs) - min(xs) > 25) or (max(ys) - min(ys) > 25)
 
 
 def boot_launched(region, cfg, timeout):
