@@ -629,29 +629,27 @@ def boot_in_flight(region, cfg, window=0.4):
 
 
 def boot_launched(region, cfg, timeout):
-    """Confirm a throw by watching for a REAL launched boot that has risen HIGH
-    into the brick field, seen over several frames.
-
-    The killer false positive: on the THROW BOOT (aim) screen the vertical
-    aim-preview dots sit in a column just above the cart (measured top ~0.60 of
-    the field) and animate, so a single "boot above launch_min_y" check fired
-    while the boot was never thrown - then the catch phase ran on the aim screen
-    and its A/D steering ROTATED THE AIM instead of moving the cart. A real
-    launch shoots the boot up into the bricks (measured y~0.15), far above the
-    dots, so requiring it clearly higher AND for >=launch_min_hits frames
-    rejects the dots; a false launch then just makes the throw loop press Space
-    again and actually throw."""
-    limit = int(region[3]) * cfg.launch_min_y
+    """Confirm the throw by seeing a REAL boot in FLIGHT - a gated, boot-sized
+    blob that MOVES. Movement is the reliable signal: the on-cart boot is static
+    (undetected) and the aim-preview dots are gated (thin line) or too small, so
+    neither trips this, while the thrown boot is moving the instant it leaves the
+    cart. So the throw loop stops right after the throw (~2 presses) instead of
+    hammering Space into an already-airborne boot, and it no longer depends on
+    catching the fast boot at a specific height (which took 6 presses)."""
     prev = detect.to_gray(grab_region(region))
+    cut = int(region[3]) * cfg.boot_search_bottom
+    seen = []
     deadline = time.time() + timeout
-    hits = 0
     while running and time.time() < deadline:
         panel = grab_region(region)
         boot, prev = detect.find_boot(panel, prev, cfg)
-        if boot is not None and boot[1] < limit and boot[2] >= cfg.launch_min_area:
-            hits += 1                                 # high in the field AND boot-sized
-            if hits >= cfg.launch_min_hits:
-                return True
+        if boot is not None and boot[2] >= cfg.launch_min_area and boot[1] < cut:
+            seen.append(boot)
+            if len(seen) >= 2:                        # a real flight travels
+                xs = [p[0] for p in seen]
+                ys = [p[1] for p in seen]
+                if (max(xs) - min(xs) > 25) or (max(ys) - min(ys) > 25):
+                    return True
         time.sleep(0.02)
     return False
 
