@@ -784,19 +784,22 @@ def main_loop(cfg, verbose):
         return
     log(f"Field region (absolute): {tuple(int(v) for v in region)}")
     refresh_hwnd(region)
-    focus_click(region)                      # try to auto-focus Dota
-    if not dota_has_kb_focus():
-        # Auto-focus into a game from a background process is unreliable (Windows
-        # foreground-lock + the game's own input handling). Fall back to the one
-        # thing that ALWAYS works - a real click - and detect it via GUIThreadInfo.
-        log("  auto-focus didn't grab keyboard.  >>> CLICK once inside the Dota")
-        log("      minigame now <<<  - I'll detect it and start (waiting 30s).")
-        deadline = time.time() + 30
-        while running and time.time() < deadline and not dota_has_kb_focus():
-            time.sleep(0.3)
+    # A REAL click is the only thing that gives the Dota minigame KEYBOARD focus.
+    # Injected clicks can press buttons (auto-PLAY works) but do NOT grant keyboard
+    # focus, and SetFocus fools GetGUIThreadInfo - so the bot cannot auto-focus or
+    # even reliably detect focus. Ask for one real click and wait for it.
+    log("=" * 60)
+    log(">>> CLICK once anywhere inside the Dota Boot Breaker window NOW <<<")
+    log("    Injected clicks can't give it keyboard focus - only your real")
+    log("    click can. (Click the title/scores area, not the PLAY button.)")
+    log(f"    Starting in {cfg.focus_click_wait:.0f}s ...")
+    log("=" * 60)
+    end = time.time() + cfg.focus_click_wait
+    while running and time.time() < end:
+        time.sleep(0.5)
     foc, _a = keyboard_focus_state()
-    log(f"Keyboard focus: {'Dota - keys will land' if dota_has_kb_focus() else 'NOT Dota - keys may be lost'}"
-        f"  (kbFocus={foc} root={_hwnd} child={_child_hwnd})")
+    log(f"  starting (win32 kbFocus={foc} root={_hwnd}). If the cart doesn't move,"
+        f" click the minigame once and it'll work from the next boot.")
     # If we're starting on a paused screen (desaturated), tap F9 to resume.
     s0 = detect.scene_saturation(grab_region(region))
     if s0 < cfg.sat_ended:

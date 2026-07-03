@@ -150,6 +150,12 @@ class Config:
     play_button_yf: float = 0.84     # PLAY button, as a fraction of field height
     intro_secs: float = 1.0          # intro must persist this long before clicking
 
+    # --- Keyboard focus ---
+    # Dota's minigame only takes KEYBOARD focus from a REAL mouse click (injected
+    # clicks can't). At startup the bot waits this long for the user to click once
+    # inside the minigame window; keys can't reach Dota until they do.
+    focus_click_wait: float = 8.0
+
 
 def load_config(path: str = CONFIG_PATH) -> Config:
     cfg = Config()
