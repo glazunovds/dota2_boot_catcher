@@ -90,6 +90,9 @@ class Config:
     catch_lead: float = 2.0        # frames of boot velocity to aim ahead of it
     catch_smooth: float = 0.45     # low-pass on the target (lower = tracks tighter)
     catch_cart_smooth: float = 0.5 # low-pass on the (noisy) cart reading
+    catch_cart_lookahead: float = 0.10  # steer to where the cart WILL be after
+                                        # this many seconds of its own momentum
+                                        # (damps overshoot past a straight boot)
     catch_deadzone_frac: float = 0.045  # start moving only past this (>per-tick travel)
     catch_coast_frac: float = 0.025     # cart coasts ~this frac after release; brake early by it
     catch_period: float = 0.005    # control tick (fast; the grab already paces it)

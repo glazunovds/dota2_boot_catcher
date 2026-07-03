@@ -660,6 +660,9 @@ def catch_phase(region, cfg):
     ever_seen = False
     target_x = None                  # boot's last SEEN x = the steer target
     cx = None                        # smoothed cart x
+    cx_prev = None                   # for cart-velocity (overshoot damping)
+    cart_vx = 0.0                    # cart velocity, px/s
+    t_cx = time.time()
     start = time.time()
     last_seen_wall = time.time()
     n = 0
@@ -672,7 +675,12 @@ def catch_phase(region, cfg):
             break
         cart = detect.find_cart_x(panel, cfg)
         if cart is not None:                          # smooth the noisy cart read
-            cx = cart if cx is None else cfg.catch_cart_smooth * cx + (1 - cfg.catch_cart_smooth) * cart
+            new_cx = cart if cx is None else cfg.catch_cart_smooth * cx + (1 - cfg.catch_cart_smooth) * cart
+            if cx_prev is not None and now > t_cx:
+                cart_vx = 0.5 * cart_vx + 0.5 * (new_cx - cx_prev) / (now - t_cx)
+            cx = new_cx
+            cx_prev = new_cx
+            t_cx = now
 
         # 1) Predict where the boot should be now, and (if locked) search only a
         #    box around it. No lock yet -> search the whole field to re-acquire.
@@ -727,7 +735,11 @@ def catch_phase(region, cfg):
 
         # 4) Steer: pure pursuit of the boot's last SEEN x, with hysteresis.
         if target_x is not None and cx is not None and lost <= cfg.boot_lost_keep:
-            steer(target_x - cx, cfg, w)
+            # Steer toward where the cart WILL be given its momentum, not where it
+            # is now - damps the overshoot that let a straight-descending boot get
+            # chased past (cart hit 748 while the boot sat at 602, then it bounced
+            # away). cart_vx*lookahead is the anticipated travel.
+            steer(target_x - (cx + cart_vx * cfg.catch_cart_lookahead), cfg, w)
         else:
             release_held()
 
