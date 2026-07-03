@@ -826,21 +826,11 @@ def main_loop(cfg, verbose):
     log(f"Field region (absolute): {tuple(int(v) for v in region)}")
     refresh_hwnd(region)
     # A REAL click is the only thing that gives the Dota minigame KEYBOARD focus.
-    # Injected clicks can press buttons (auto-PLAY works) but do NOT grant keyboard
-    # focus, and SetFocus fools GetGUIThreadInfo - so the bot cannot auto-focus or
-    # even reliably detect focus. Ask for one real click and wait for it.
-    log("=" * 60)
-    log(">>> CLICK once anywhere inside the Dota Boot Breaker window NOW <<<")
-    log("    Injected clicks can't give it keyboard focus - only your real")
-    log("    click can. (Click the title/scores area, not the PLAY button.)")
-    log(f"    Starting in {cfg.focus_click_wait:.0f}s ...")
-    log("=" * 60)
-    end = time.time() + cfg.focus_click_wait
-    while running and time.time() < end:
-        time.sleep(0.5)
-    foc, _a = keyboard_focus_state()
-    log(f"  starting (win32 kbFocus={foc} root={_hwnd}). If the cart doesn't move,"
-        f" click the minigame once and it'll work from the next boot.")
+    # Focus needs a REAL click on the GAME panel - but that panel only exists once
+    # a LEVEL is loaded (the intro/PLAY screen is a DIFFERENT panel, so clicking it
+    # focuses the wrong thing). So: auto-PLAY starts the level first, THEN we prompt
+    # for the click once the field is up. The prompt is in the loop below.
+    log("  (auto-clicking PLAY to load a level; you'll be asked to click the field)")
     # If we're starting on a paused screen (desaturated), tap F9 to resume.
     s0 = detect.scene_saturation(grab_region(region))
     if s0 < cfg.sat_ended:
@@ -849,6 +839,7 @@ def main_loop(cfg, verbose):
         time.sleep(0.8)
 
     shot = 0
+    focus_prompted = False
     while running:
         if not wait_ready(region, cfg):
             if running:
@@ -857,6 +848,22 @@ def main_loop(cfg, verbose):
                 if new_region is not None:
                     region = new_region
             continue
+        if not focus_prompted:
+            # The LEVEL is now loaded, so the game panel exists. THIS is the moment
+            # to click it for keyboard focus (clicking the intro earlier focused the
+            # wrong panel). One click; focus then holds for the whole session.
+            log("=" * 62)
+            log(">>> The level is up. CLICK once inside the GAME FIELD now <<<")
+            log("    (the dark play area with the cart - NOT the title/menu).")
+            log("    That focuses the game so A/D/Space land. Continuing in"
+                f" {cfg.focus_click_wait:.0f}s...")
+            log("=" * 62)
+            fend = time.time() + cfg.focus_click_wait
+            while running and time.time() < fend:
+                time.sleep(0.5)
+            foc, _a = keyboard_focus_state()
+            log(f"  continuing (kbFocus={foc} root={_hwnd}).")
+            focus_prompted = True
         shot += 1
         log(f"[boot {shot}] lock -> throw -> catch")
         play_level(region, cfg, verbose)
