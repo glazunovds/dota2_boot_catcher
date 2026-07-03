@@ -1,0 +1,873 @@
+"""
+Dota 2 Boot Breaker bot.
+
+Auto-plays the Dark Carnival "Boot Breaker" minigame (position the cart under
+the bricks, lock, aim, throw the boot, repeat). mss capture + OpenCV detection +
+global keyboard input. Multi-monitor aware (auto-scans monitors for the game).
+
+Usage
+-----
+  python main.py                 interactive: press 's' to start, hold 'q' to stop
+  python main.py --grab           save one screenshot per monitor (debug), then exit
+  python main.py --dry-run        print detections + save debug frames, no keys
+  python main.py --calibrate      pin the field by pointing at the gold frame
+  python main.py --monitor N      force capture of monitor N (1 = first)
+  python main.py --snapshot NAME  save one field screenshot to snapshots/
+  python main.py --debug          save annotated frames while playing
+
+How to play
+-----------
+1. Open the Boot Breaker minigame (the intro PLAY screen or a level is fine).
+2. Run `python main.py`, then press 's'. It auto-clicks PLAY and plays on.
+   Hold 'q' to stop, Ctrl+C to quit.
+
+Keyboard input goes to whatever window is focused; the auto-PLAY click focuses
+Dota for you. Detection is colour-based - verify with `--dry-run` first and tune
+config.json if needed (see README). The `keyboard` library usually needs the
+terminal run as Administrator to reach Dota.
+"""
+
+import argparse
+import ctypes
+import os
+import sys
+import threading
+import time
+
+import cv2
+import numpy as np
+import mss
+import keyboard
+
+import detect
+from config import Config, load_config, save_config
+
+running = False       # True while a game is being played
+stop_flag = True      # keeps the 'q' listener thread alive
+_held = None          # currently held movement key ('a'/'d') or None
+_dbg_dir = None       # set to a folder path to dump annotated frames
+_dbg_n = 0
+_sct = None           # lazily-opened mss capture handle
+_log_f = None         # optional log file handle
+_t0 = time.time()
+
+
+def log(msg):
+    line = f"[{time.time() - _t0:7.2f}s] {msg}"
+    print(line, flush=True)
+    if _log_f is not None:
+        _log_f.write(line + "\n")
+        _log_f.flush()
+
+
+def set_dpi_aware():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor v1
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# Capture (mss; multi-monitor aware, uses absolute virtual-desktop coords)
+# --------------------------------------------------------------------------- #
+
+def _sct_handle():
+    global _sct
+    if _sct is None:
+        _sct = (getattr(mss, "MSS", None) or mss.mss)()
+    return _sct
+
+
+def grab_region(region):
+    """Grab an absolute virtual-desktop region -> BGR array. region=(l,t,w,h)."""
+    l, t, w, h = (int(v) for v in region)
+    shot = _sct_handle().grab({"left": l, "top": t, "width": w, "height": h})
+    return np.ascontiguousarray(np.asarray(shot)[:, :, :3])   # BGRA -> BGR
+
+
+def monitors():
+    # mss.monitors[0] is the whole virtual desktop; [1:] are the real monitors.
+    return _sct_handle().monitors
+
+
+def find_game_region(cfg):
+    """Absolute (l, t, w, h) of the play field, scanning monitors if needed."""
+    if cfg.region:
+        return tuple(int(v) for v in cfg.region)
+    mons = monitors()
+    search = [mons[cfg.monitor]] if cfg.monitor and cfg.monitor < len(mons) else mons[1:]
+    best = None                                  # (region, score)
+    for mon in search:
+        img = grab_region((mon["left"], mon["top"], mon["width"], mon["height"]))
+        r = detect.locate_field(img, cfg)
+        if r is None:
+            continue
+        l, t, w, h = r
+        field = img[t:t + h, l:l + w]
+        sat = detect.scene_saturation(field)
+        region = (mon["left"] + l, mon["top"] + t, w, h)
+        # Several monitors can hold gold that passes the frame test. DON'T just
+        # take the first-scanned one - a stray, dim gold region on the (first-
+        # scanned) second monitor was shadowing the real game on the ultrawide.
+        # Prefer the match that looks like the LIVE minigame: brightly saturated
+        # AND large. (sat ~230 while playing; a false/dim match ~10-20.)
+        score = sat * w * h
+        if best is None or score > best[1]:
+            best = (region, score)
+    return best[0] if best else None
+
+
+# Backwards-friendly alias used by the modes.
+def get_panel_region(cfg, screen=None):
+    return find_game_region(cfg)
+
+
+# --------------------------------------------------------------------------- #
+# Mouse (ctypes; works across monitors, unlike pyautogui)
+# --------------------------------------------------------------------------- #
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def cursor_pos():
+    p = _POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(p))
+    return (p.x, p.y)
+
+
+def move_mouse(x, y):
+    ctypes.windll.user32.SetCursorPos(int(x), int(y))
+
+
+def click_at(x, y):
+    move_mouse(x, y)
+    time.sleep(0.05)
+    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)   # left down
+    time.sleep(0.03)
+    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)   # left up
+
+
+def park_cursor():
+    move_mouse(10, 10)   # top-left of the primary screen, off the game
+
+
+# --------------------------------------------------------------------------- #
+# Window focus (keyboard input only reaches the FOREGROUND window)
+# --------------------------------------------------------------------------- #
+
+GA_ROOT = 2
+_hwnd = 0
+_win32_ready = False
+
+
+def _init_win32():
+    global _win32_ready
+    if _win32_ready:
+        return
+    u = ctypes.windll.user32
+    # Default ctypes restype is c_int (32-bit) which truncates HWNDs on 64-bit.
+    u.WindowFromPoint.restype = ctypes.c_void_p
+    u.WindowFromPoint.argtypes = [_POINT]
+    u.GetAncestor.restype = ctypes.c_void_p
+    u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    u.GetForegroundWindow.restype = ctypes.c_void_p
+    u.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+    u.BringWindowToTop.argtypes = [ctypes.c_void_p]
+    u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _win32_ready = True
+
+
+def refresh_hwnd(region):
+    """Find the top-level game window under the play field's centre."""
+    global _hwnd
+    _init_win32()
+    u = ctypes.windll.user32
+    cx = int(region[0] + region[2] // 2)
+    cy = int(region[1] + region[3] // 2)
+    hwnd = u.WindowFromPoint(_POINT(cx, cy))
+    if hwnd:
+        root = u.GetAncestor(hwnd, GA_ROOT)
+        _hwnd = root or hwnd
+    return _hwnd
+
+
+def focus_game():
+    """Bring the game window to the foreground so key input lands on Dota."""
+    if not _hwnd:
+        return
+    u = ctypes.windll.user32
+    if u.GetForegroundWindow() == _hwnd:
+        return
+    cur = ctypes.windll.kernel32.GetCurrentThreadId()
+    tgt = u.GetWindowThreadProcessId(_hwnd, None)
+    fg = u.GetForegroundWindow()
+    fgt = u.GetWindowThreadProcessId(fg, None) if fg else 0
+    if fgt and fgt != cur:
+        u.AttachThreadInput(cur, fgt, True)
+    if tgt and tgt != cur:
+        u.AttachThreadInput(cur, tgt, True)
+    u.BringWindowToTop(_hwnd)
+    u.SetForegroundWindow(_hwnd)
+    if tgt and tgt != cur:
+        u.AttachThreadInput(cur, tgt, False)
+    if fgt and fgt != cur:
+        u.AttachThreadInput(cur, fgt, False)
+
+
+def focus_click(region):
+    """Reliably focus Dota by clicking a harmless spot on its window - Windows
+    blocks background apps from SetForegroundWindow, but a real click always
+    focuses the window under it. Clicks the HUD strip above the play field
+    (BOOTS/LEVEL/SCORE - not a button), then parks the cursor off-screen."""
+    l, t, w, h = region
+    x = int(l + w * 0.5)
+    y = int(t - h * 0.05)      # just above the field, inside the modal's HUD
+    click_at(x, y)
+    time.sleep(0.08)
+    focus_game()
+    park_cursor()
+
+
+# --------------------------------------------------------------------------- #
+# Keyboard control (global; goes to the focused Dota window)
+# --------------------------------------------------------------------------- #
+
+def hold(key):
+    global _held
+    if _held == key:
+        return
+    release_held()
+    keyboard.press(key)
+    _held = key
+
+
+def release_held():
+    global _held
+    if _held is not None:
+        keyboard.release(_held)
+        _held = None
+
+
+def tap(key, hold=0.10):
+    """Press a key and hold it briefly. A zero-length tap is often ignored by
+    Dota, so we hold for `hold` seconds (default 100 ms)."""
+    keyboard.press(key)
+    time.sleep(hold)
+    keyboard.release(key)
+
+
+# --------------------------------------------------------------------------- #
+# Debug frame dump
+# --------------------------------------------------------------------------- #
+
+def snap(region, cfg, label, cart_x=None, target_x=None, boot=None):
+    """Grab the field and (if --debug) save an annotated frame. Returns
+    (sat, cart_x) so callers can log the scene state cheaply."""
+    global _dbg_n
+    panel = grab_region(region)
+    sat = detect.scene_saturation(panel)
+    if cart_x is None:
+        cart_x = detect.find_cart_x(panel, cfg)
+    if _dbg_dir:
+        img = detect.annotate(panel, cfg, cart_x, target_x, int(sat), label, boot)
+        cv2.imwrite(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_{label}.png"), img)
+        _dbg_n += 1
+    return sat, cart_x
+
+
+# --------------------------------------------------------------------------- #
+# Control loop
+# --------------------------------------------------------------------------- #
+
+def move_cart(region, target_x, cfg):
+    """Position the cart on the LOCK screen. It PROBES first: the cart is very
+    fast, so if a few A/D pulses don't move it, we're not on the LOCK screen
+    (A/D is rotating the aim, or the cart is locked) - stop immediately so we
+    don't wreck the launch aim."""
+    focus_game()
+    dead = cfg.move_deadzone_frac * int(region[2])
+    deadline = time.time() + cfg.move_timeout
+    last_cart = None
+    start_cart = None
+    steps = 0
+    while running and time.time() < deadline:
+        panel = grab_region(region)
+        cart = detect.find_cart_x(panel, cfg)
+        if cart is None:
+            log(f"    move: cart not seen (target={target_x}) - stopping")
+            break
+        if start_cart is None:
+            start_cart = cart
+        last_cart = cart
+        err = target_x - cart
+        if abs(err) <= dead:
+            break
+        # Probe: after a few pulses, a LOCK-screen cart has clearly moved
+        # (~200px). If it hasn't, we're on the aim/throw screen -> stop now.
+        if steps >= cfg.move_probe_steps and abs(cart - start_cart) < 8:
+            log("    not the LOCK screen (cart didn't move) - skipping positioning")
+            break
+        hold('d' if err > 0 else 'a')
+        steps += 1
+        time.sleep(cfg.move_pulse)
+    release_held()
+    log(f"    moved cart -> {last_cart} (target {target_x}, {steps} pulses)")
+
+
+def do_aim(cfg):
+    taps = cfg.aim_taps
+    if not taps:
+        return
+    key = 'd' if taps > 0 else 'a'
+    for _ in range(abs(taps)):
+        if not running:
+            break
+        keyboard.press(key)
+        time.sleep(cfg.aim_tap_hold)
+        keyboard.release(key)
+        time.sleep(0.04)
+
+
+def click_play(region, cfg):
+    """Click the PLAY button (intro / end-of-run screen) to start a game."""
+    l, t, w, h = region
+    x, y = int(l + w * 0.5), int(t + h * cfg.play_button_yf)
+    click_at(x, y)
+    time.sleep(0.1)
+    focus_game()
+    park_cursor()
+    log(f"  clicked PLAY at ({x},{y})")
+
+
+def wait_ready(region, cfg):
+    """Wait until the field is saturated (rendered) AND a cart is visible,
+    i.e. a level is ready for input. Clicks PLAY if it sees the intro/menu.
+    Returns True, or False on timeout/stop."""
+    period = 1.0 / max(1.0, cfg.poll_hz)
+    deadline = time.time() + cfg.ready_timeout
+    intro_since = None
+    last_click = 0.0
+    prev_gray = detect.to_gray(grab_region(region))   # prime motion baseline
+    while running and time.time() < deadline:
+        field = grab_region(region)
+        sat = detect.scene_saturation(field)
+        cart = detect.find_cart_x(field, cfg)
+        boot, prev_gray = detect.find_boot(field, prev_gray, cfg)
+        # Ready to lock only if a level is rendered, the cart is visible, and no
+        # boot is still in flight (otherwise we'd lock/throw mid-bounce).
+        if sat >= cfg.sat_ready and cart is not None and boot is None:
+            time.sleep(cfg.settle_delay)
+            snap(region, cfg, "ready")
+            log(f"  READY (sat={sat:.0f} cart={cart})")
+            return True
+        # Intro / menu (a PLAY button): mid saturation, no cart -> press PLAY.
+        now = time.time()
+        if cfg.auto_play and cart is None and cfg.sat_ended <= sat < cfg.sat_ready:
+            intro_since = intro_since or now
+            if now - intro_since >= cfg.intro_secs and now - last_click >= 3.0:
+                click_play(region, cfg)
+                last_click = now
+                intro_since = None
+        else:
+            intro_since = None
+        time.sleep(period)
+    return False
+
+
+def play_level(region, cfg, verbose):
+    # 1) optionally position the cart under the bricks. OFF by default: A/D only
+    # moves the cart on the LOCK screen; on the THROW screen it rotates the aim,
+    # and the two screens can't be told apart reliably, so positioning risks
+    # wrecking the (good) default up-ish launch. The launch spot barely matters
+    # since the boot bounces everywhere anyway.
+    if cfg.position_cart:
+        panel = grab_region(region)
+        target_x = detect.find_brick_centroid_x(panel, cfg) or int(region[2]) // 2
+        log(f"  positioning cart -> {target_x}")
+        move_cart(region, target_x, cfg)
+    s, c = snap(region, cfg, "pre_lock")
+    if s < cfg.sat_ready:
+        # The level ended/transitioned while we were positioning - bail so we
+        # don't lock/throw into a loading screen.
+        log(f"  aborting boot: scene changed (sat={s:.0f})")
+        return
+    # 2) lock + throw: press Space until the boot actually launches. This one
+    # loop covers the normal lock->throw pair AND the case (common on the first
+    # boot after PLAY) where a press gets eaten during the level fade-in.
+    launched = False
+    for i in range(cfg.throw_max_presses):
+        if not running:
+            break
+        snap(region, cfg, "space")
+        log(f"  Space press {i + 1}")
+        tap('space', cfg.space_hold)
+        if boot_launched(region, cfg, cfg.launch_wait):
+            log(f"  boot launched after {i + 1} press(es)")
+            launched = True
+            break
+        time.sleep(cfg.post_lock_delay)
+    if not launched:
+        log("  boot never launched - giving up this attempt")
+        return
+
+    # 3) catch phase: follow the boot with the cart until it's gone
+    catch_phase(region, cfg)
+
+
+def boot_launched(region, cfg, timeout):
+    """Confirm a throw by watching for a REAL launched boot that has risen HIGH
+    into the brick field, seen over several frames.
+
+    The killer false positive: on the THROW BOOT (aim) screen the vertical
+    aim-preview dots sit in a column just above the cart (measured top ~0.60 of
+    the field) and animate, so a single "boot above launch_min_y" check fired
+    while the boot was never thrown - then the catch phase ran on the aim screen
+    and its A/D steering ROTATED THE AIM instead of moving the cart. A real
+    launch shoots the boot up into the bricks (measured y~0.15), far above the
+    dots, so requiring it clearly higher AND for >=launch_min_hits frames
+    rejects the dots; a false launch then just makes the throw loop press Space
+    again and actually throw."""
+    limit = int(region[3]) * cfg.launch_min_y
+    prev = detect.to_gray(grab_region(region))
+    deadline = time.time() + timeout
+    hits = 0
+    while running and time.time() < deadline:
+        panel = grab_region(region)
+        boot, prev = detect.find_boot(panel, prev, cfg)
+        if boot is not None and boot[1] < limit:      # high in the brick field
+            hits += 1
+            if hits >= cfg.launch_min_hits:
+                return True
+        time.sleep(0.02)
+    return False
+
+
+def steer(err, cfg, field_w):
+    """Move the cart toward an x-error. Two measured facts drive this:
+      * the cart travels ~27-55px per control tick, so it only STARTS moving when
+        the error exceeds a deadzone (a fraction of the field) - else it jitters;
+      * after the key is released the cart COASTS ~21px, so it releases that far
+        BEFORE the target and lets momentum carry it precisely onto the boot,
+        instead of overshooting and reversing.
+    Hysteresis (start at `dead`, stop at `coast`) keeps it from chattering."""
+    dead = cfg.catch_deadzone_frac * field_w
+    coast = cfg.catch_coast_frac * field_w
+    switch = dead * 1.5                 # must exceed this to reverse direction
+    if _held == 'd':
+        if err < -switch:
+            hold('a')
+        elif err < coast:               # momentum will carry it the rest -> release
+            release_held()
+    elif _held == 'a':
+        if err > switch:
+            hold('d')
+        elif err > -coast:
+            release_held()
+    else:
+        if err > dead:
+            hold('d')
+        elif err < -dead:
+            hold('a')
+
+
+def predict_landing(bx, by, vx, vy, left, right, catch_y):
+    """Where the boot will cross the cart line, bouncing off the side walls.
+    Straight-line (arcade) physics, per-frame velocity units. None if ascending."""
+    if vy <= 0:
+        return None
+    x, y, vxx = float(bx), float(by), float(vx)
+    guard = 0
+    while y < catch_y and guard < 2000:
+        x += vxx
+        y += vy
+        if x <= left:
+            x = left + (left - x)
+            vxx = -vxx
+        elif x >= right:
+            x = right - (x - right)
+            vxx = -vxx
+        guard += 1
+    return max(left, min(right, x))
+
+
+def catch_phase(region, cfg):
+    """Follow the boot with the cart. Ported from the reference Rust catcher,
+    which is reliable because of its TRACKER, not clever steering:
+      * search for the boot only inside a small ROI around its predicted path
+        (so stray orange motion - UI, aim dots, the jester - can't be grabbed
+        as a far-away false boot);
+      * GATE detections: reject anything implausibly far from the prediction and
+        coast on the estimate instead;
+      * then simply steer the cart toward the boot's LAST SEEN x (pure pursuit,
+        no velocity lead / landing projection - those chased noisy per-tick
+        predictions and overshot the wrong way at contact).
+    """
+    global _dbg_n
+    w, h = int(region[2]), int(region[3])
+    prev_gray = None
+    _tel = []                        # per-tick telemetry -> debug/catch_tel.csv
+    bx = by = None                   # tracked boot position (px), None = no lock
+    bvx = bvy = 0.0                  # tracked boot velocity (px/s)
+    last_t = None
+    lost = 0                         # consecutive frames without an accepted det
+    seen = 0                         # consecutive accepted dets (tracker age)
+    ever_seen = False
+    target_x = None                  # boot's last SEEN x = the steer target
+    cx = None                        # smoothed cart x
+    start = time.time()
+    last_seen_wall = time.time()
+    n = 0
+    while running and time.time() - start < cfg.catch_timeout:
+        panel = grab_region(region)
+        now = time.time()
+        sat = detect.scene_saturation(panel)
+        if sat < cfg.sat_ended:                       # level ended (loading dip)
+            log("  catch: level ended (loading dip)")
+            break
+        cart = detect.find_cart_x(panel, cfg)
+        if cart is not None:                          # smooth the noisy cart read
+            cx = cart if cx is None else cfg.catch_cart_smooth * cx + (1 - cfg.catch_cart_smooth) * cart
+
+        # 1) Predict where the boot should be now, and (if locked) search only a
+        #    box around it. No lock yet -> search the whole field to re-acquire.
+        tracking = bx is not None and lost <= cfg.boot_lost_keep
+        pred_x = pred_y = None
+        roi = None
+        if tracking and last_t is not None:
+            dt = now - last_t
+            pred_x = bx + bvx * dt
+            pred_y = by + bvy * dt
+            speed = (bvx * bvx + bvy * bvy) ** 0.5
+            radius = cfg.boot_roi_pad + speed * cfg.boot_roi_speed + lost * cfg.boot_roi_lost_grow
+            roi = (pred_x - radius, pred_y - radius, pred_x + radius, pred_y + radius)
+        det, prev_gray = detect.find_boot(panel, prev_gray, cfg, roi)
+
+        # 2) Gate: reject a detection implausibly far from the prediction.
+        if det is not None and pred_x is not None and seen >= 2 and lost <= 6:
+            dist = ((det[0] - pred_x) ** 2 + (det[1] - pred_y) ** 2) ** 0.5
+            speed = (bvx * bvx + bvy * bvy) ** 0.5
+            gate = cfg.boot_gate_base + speed * 0.12 + lost * cfg.boot_gate_lost
+            if dist > gate:
+                det = None
+
+        # 3) Update the tracker (smoothed velocity) or coast the estimate.
+        if det is not None:
+            dx, dy = det[0], det[1]
+            if bx is not None and last_t is not None and now > last_t:
+                dt = now - last_t
+                bvx = 0.55 * bvx + 0.45 * (dx - bx) / dt
+                bvy = 0.55 * bvy + 0.45 * (dy - by) / dt
+            else:
+                bvx = bvy = 0.0
+            bx, by = float(dx), float(dy)
+            last_t = now
+            lost = 0
+            seen += 1
+            ever_seen = True
+            target_x = dx
+            last_seen_wall = now
+        else:
+            lost += 1
+            if bx is not None and last_t is not None:     # coast the estimate on
+                dt = now - last_t
+                bx += bvx * dt
+                by += bvy * dt
+                last_t = now
+            if lost > cfg.boot_lost_keep:                 # drop the lock, re-acquire
+                bx = by = None
+                bvx = bvy = 0.0
+                seen = 0
+                target_x = None
+
+        # 4) Steer: pure pursuit of the boot's last SEEN x, with hysteresis.
+        if target_x is not None and cx is not None and lost <= cfg.boot_lost_keep:
+            steer(target_x - cx, cfg, w)
+        else:
+            release_held()
+
+        if _dbg_dir and n % 4 == 0:                   # save clean + annotated
+            cv2.imwrite(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch_raw.png"), panel)
+            boot_draw = (int(bx), int(by)) if bx is not None else None
+            ann = detect.annotate(panel, cfg, int(cx) if cx is not None else cart,
+                                  int(target_x) if target_x is not None else None,
+                                  int(sat), "catch", boot_draw)
+            cv2.imwrite(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch.png"), ann)
+            _dbg_n += 1
+        n += 1
+        _tel.append((round(now - start, 3),
+                     int(bx) if bx is not None else "",
+                     int(by) if by is not None else "",
+                     det[0] if det is not None else "",
+                     det[2] if det is not None else "",   # detected blob area
+                     cart if cart is not None else "",
+                     round(cx, 1) if cx is not None else "",
+                     round(target_x, 1) if target_x is not None else "",
+                     round(bvx, 1), round(bvy, 1), lost))
+        # End the phase once the boot has been gone a while (caught or dropped).
+        if time.time() - last_seen_wall > cfg.boot_lost_secs:
+            log(f"  catch: boot gone ({'caught/lost' if ever_seen else 'never seen'})")
+            break
+        time.sleep(cfg.catch_period)
+    release_held()
+    if _dbg_dir and _tel:                       # dump this rally's telemetry
+        p = os.path.join(_dbg_dir, "catch_tel.csv")
+        header = not os.path.exists(p)
+        with open(p, "a", encoding="utf-8") as f:
+            if header:
+                f.write("t,bx,by,det_x,det_area,cart,cx,target,vx,vy,lost\n")
+            f.write("# --- boot ---\n")
+            for r in _tel:
+                f.write(",".join(str(x) for x in r) + "\n")
+
+
+def main_loop(cfg, verbose):
+    global running
+    park_cursor()                            # keep cursor off the game
+    region = find_game_region(cfg)
+    if region is None and cfg.unpause_f9:
+        # No modal at all usually means the pause overlay - try to resume.
+        log("No modal found; tapping F9 in case it's paused...")
+        tap('f9', cfg.space_hold)
+        time.sleep(0.7)
+        region = get_panel_region(cfg)
+    if region is None:
+        log("! Could not locate the play field on any monitor. Make sure the\n"
+            "  minigame is open, then try `--grab` to check what's captured,\n"
+            "  `--monitor N` to force a monitor, or `--calibrate` to pin it.")
+        running = False
+        return
+    log(f"Field region (absolute): {tuple(int(v) for v in region)}")
+    refresh_hwnd(region)
+    focus_click(region)                      # click Dota so keys land on it
+    log("Focused Dota via click.")
+    # If we're starting on a paused screen (desaturated), tap F9 to resume.
+    s0 = detect.scene_saturation(grab_region(region))
+    if s0 < cfg.sat_ended:
+        log(f"  low saturation at start (sat={s0:.0f}) - tapping F9 to unpause")
+        tap('f9', cfg.space_hold)
+        time.sleep(0.8)
+
+    shot = 0
+    while running:
+        if not wait_ready(region, cfg):
+            if running:
+                log("  no ready level detected (timeout) - re-locating...")
+                new_region = get_panel_region(cfg)
+                if new_region is not None:
+                    region = new_region
+            continue
+        shot += 1
+        log(f"[boot {shot}] lock -> throw -> catch")
+        play_level(region, cfg, verbose)
+    release_held()
+    log("Loop stopped.")
+
+
+# --------------------------------------------------------------------------- #
+# Hotkey plumbing (mirrors the minesweeper bot)
+# --------------------------------------------------------------------------- #
+
+def start_game(cfg, verbose):
+    global running
+    if not running:
+        running = True
+        log("=== Starting Boot Breaker bot ===")
+        try:
+            main_loop(cfg, verbose)
+        finally:
+            release_held()
+
+
+def listen_for_stop():
+    global running
+    while stop_flag:
+        if keyboard.is_pressed('q') and running:
+            running = False
+            print("'q' pressed - stopping after current step...")
+        time.sleep(0.01)
+
+
+def run_interactive(cfg, verbose):
+    global stop_flag
+    t = threading.Thread(target=listen_for_stop, daemon=True)
+    t.start()
+    keyboard.add_hotkey('s', lambda: start_game(cfg, verbose))
+    print("Ready. Open Boot Breaker (intro or a level), then press 's'.\n"
+          "It will click PLAY if needed and play on. Hold 'q' to stop, Ctrl+C to quit.")
+    try:
+        keyboard.wait('ctrl+c')
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_flag = False
+        release_held()
+        t.join(timeout=1.0)
+        print("Bye.")
+
+
+# --------------------------------------------------------------------------- #
+# Utility modes
+# --------------------------------------------------------------------------- #
+
+def do_calibrate(cfg):
+    def pick(label):
+        print(f"{label}: hover the mouse and hold still for 3s...")
+        base = cursor_pos()
+        stable = time.time()
+        while True:
+            time.sleep(0.05)
+            p = cursor_pos()
+            if abs(p[0] - base[0]) <= 4 and abs(p[1] - base[1]) <= 4:
+                if time.time() - stable >= 3.0:
+                    print(f"  -> {p}")
+                    return p
+            else:
+                base, stable = p, time.time()
+
+    print("Point at the GOLD FRAME corners of the minigame window (the ornate\n"
+          "border with the bolts), works on any monitor.")
+    a = pick("Top-left frame corner")
+    b = pick("Bottom-right frame corner")
+    ml, mt = min(a[0], b[0]), min(a[1], b[1])
+    mw, mh = abs(b[0] - a[0]), abs(b[1] - a[1])
+    if mw < 250 or mh < 300:
+        print(f"Frame {mw}x{mh} looks too small - aborting.")
+        return
+    # Inset the modal to the play field using the measured fractions.
+    fl = int(ml + mw * cfg.field_x0)
+    ft = int(mt + mh * cfg.field_y0)
+    fw = int(mw * (cfg.field_x1 - cfg.field_x0))
+    fh = int(mh * (cfg.field_y1 - cfg.field_y0))
+    cfg.region = [fl, ft, fw, fh]
+    print(f"Field region: {cfg.region}")
+    save_config(cfg)
+
+
+def do_snapshot(cfg, name):
+    region = find_game_region(cfg)
+    if region is None:
+        print("Could not locate the field - try --grab instead.")
+        return
+    img = grab_region(region)
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"{name}.png")
+    cv2.imwrite(out, img)
+    print(f"Saved field snapshot -> {out}  ({img.shape[1]}x{img.shape[0]})")
+
+
+def do_grab(cfg):
+    """Save one PNG per monitor so you can see exactly what the bot captures."""
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    os.makedirs(out_dir, exist_ok=True)
+    mons = monitors()
+    print(f"{len(mons) - 1} monitor(s) detected.")
+    for i, mon in enumerate(mons[1:], start=1):
+        img = grab_region((mon["left"], mon["top"], mon["width"], mon["height"]))
+        r = detect.locate_field(img, cfg)
+        out = os.path.join(out_dir, f"monitor{i}.png")
+        cv2.imwrite(out, img)
+        found = f"field found at {r}" if r else "no field found"
+        print(f"  monitor{i} {mon['width']}x{mon['height']} @({mon['left']},{mon['top']}) "
+              f"-> {out}  [{found}]")
+
+
+def do_dry_run(cfg, seconds, debug_dir):
+    region = find_game_region(cfg)
+    if region is None:
+        print("! Could not locate the play field on any monitor. Try --grab, "
+              "--monitor N, or --calibrate.")
+        return
+    print(f"Field region (absolute): {tuple(int(v) for v in region)}")
+    if debug_dir:
+        os.makedirs(debug_dir, exist_ok=True)
+    print("DRY RUN - no keys pressed. Ctrl+C to stop.\n"
+          "Check the red line sits on the cart and the green line on the middle "
+          "of the bricks; sat should be high (~200+) while playing and drop near "
+          "0 during the between-level loading. Then tune config.json.")
+    period = 1.0 / max(1.0, cfg.poll_hz)
+    end = time.time() + seconds
+    n = 0
+    try:
+        while time.time() < end:
+            panel = grab_region(region)
+            cart = detect.find_cart_x(panel, cfg)
+            target = detect.find_brick_centroid_x(panel, cfg)
+            sat = detect.scene_saturation(panel)
+            ready = sat >= cfg.sat_ready and cart is not None
+            state = "READY" if ready else ("loading" if sat < cfg.sat_ended else "busy")
+            print(f"sat={sat:6.1f} cart={cart!s:>5} target={target!s:>5} -> {state}")
+            if debug_dir and n % 4 == 0:
+                img = detect.annotate(panel, cfg, cart, target, int(sat), state)
+                cv2.imwrite(os.path.join(debug_dir, f"dry{n:05d}.png"), img)
+            n += 1
+            time.sleep(period)
+    except KeyboardInterrupt:
+        print("Stopped.")
+
+
+# --------------------------------------------------------------------------- #
+
+def build_parser():
+    p = argparse.ArgumentParser(description="Dota 2 Boot Breaker bot")
+    p.add_argument("--calibrate", action="store_true", help="pin the field by pointing at the gold frame")
+    p.add_argument("--dry-run", action="store_true", help="detect only, press no keys")
+    p.add_argument("--dry-seconds", type=float, default=30.0)
+    p.add_argument("--snapshot", metavar="NAME", help="save one field screenshot and exit")
+    p.add_argument("--grab", action="store_true", help="save one screenshot per monitor and exit")
+    p.add_argument("--monitor", type=int, help="force capture of mss monitor N (1=first)")
+    p.add_argument("--no-auto-play", action="store_true", help="don't auto-click the PLAY button")
+    p.add_argument("--no-debug", action="store_true", help="don't save annotated frames while playing")
+    p.add_argument("--debug-dir", default="debug")
+    p.add_argument("--verbose", "-v", action="store_true")
+    return p
+
+
+def main():
+    global _dbg_dir, _log_f
+    set_dpi_aware()
+    args = build_parser().parse_args()
+    cfg = load_config()
+    if args.monitor is not None:
+        cfg.monitor = args.monitor
+    if args.no_auto_play:
+        cfg.auto_play = False
+
+    if args.calibrate:
+        do_calibrate(cfg)
+        return
+    if args.grab:
+        do_grab(cfg)
+        return
+    if args.snapshot:
+        do_snapshot(cfg, args.snapshot)
+        return
+    if args.dry_run:
+        do_dry_run(cfg, args.dry_seconds, args.debug_dir)
+        return
+
+    # Interactive play: always write a log; save debug frames unless disabled.
+    here = os.path.dirname(os.path.abspath(__file__))
+    _log_f = open(os.path.join(here, "boot_breaker.log"), "w", encoding="utf-8")
+    if not args.no_debug:
+        _dbg_dir = os.path.join(here, args.debug_dir)
+        os.makedirs(_dbg_dir, exist_ok=True)
+        for old in os.listdir(_dbg_dir):                 # fresh frames each run
+            if (old.startswith("f") and old.endswith(".png")) or old == "catch_tel.csv":
+                try:
+                    os.remove(os.path.join(_dbg_dir, old))
+                except OSError:
+                    pass
+        log(f"Saving debug frames to {_dbg_dir}")
+    run_interactive(cfg, args.verbose)
+
+
+if __name__ == "__main__":
+    if sys.platform != "win32":
+        print("This bot is Windows-only.")
+        sys.exit(1)
+    main()
