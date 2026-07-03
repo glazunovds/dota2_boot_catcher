@@ -375,28 +375,67 @@ def focus_click(region):
 # Keyboard control (global; goes to the focused Dota window)
 # --------------------------------------------------------------------------- #
 
+# --- Key send. PostMessage delivers WM_KEYDOWN/UP straight to the Dota window's
+# message queue, which does NOT require keyboard focus - if the minigame handles
+# window key-messages this sidesteps the whole focus fight (no click needed). The
+# `keyboard` library (SendInput) is the fallback; it needs the window focused.
+_use_post = True
+WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+_VK = {'a': 0x41, 'd': 0x44, 'space': 0x20, 'f9': 0x78}
+_SC = {'a': 0x1E, 'd': 0x20, 'space': 0x39, 'f9': 0x43}
+_post_ready = False
+
+
+def _post_key(name, up):
+    """Send a key to Dota by posting WM_KEYDOWN/WM_KEYUP to its window."""
+    global _post_ready
+    u = ctypes.windll.user32
+    if not _post_ready:
+        u.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+        u.PostMessageW.restype = ctypes.c_int
+        _post_ready = True
+    tgt = _child_hwnd or _hwnd
+    if not tgt:
+        return
+    vk, sc = _VK.get(name, 0), _SC.get(name, 0)
+    if up:
+        lparam = 1 | (sc << 16) | (1 << 30) | (1 << 31)   # prev-down + key-up transition
+        u.PostMessageW(tgt, WM_KEYUP, vk, lparam)
+    else:
+        lparam = 1 | (sc << 16)                            # repeat 1, scancode
+        u.PostMessageW(tgt, WM_KEYDOWN, vk, lparam)
+
+
+def _key_down(name):
+    _post_key(name, False) if _use_post else keyboard.press(name)
+
+
+def _key_up(name):
+    _post_key(name, True) if _use_post else keyboard.release(name)
+
+
 def hold(key):
     global _held
     if _held == key:
         return
     release_held()
-    keyboard.press(key)
+    _key_down(key)
     _held = key
 
 
 def release_held():
     global _held
     if _held is not None:
-        keyboard.release(_held)
+        _key_up(_held)
         _held = None
 
 
 def tap(key, hold=0.10):
     """Press a key and hold it briefly. A zero-length tap is often ignored by
     Dota, so we hold for `hold` seconds (default 100 ms)."""
-    keyboard.press(key)
+    _key_down(key)
     time.sleep(hold)
-    keyboard.release(key)
+    _key_up(key)
 
 
 # --------------------------------------------------------------------------- #
@@ -849,20 +888,24 @@ def main_loop(cfg, verbose):
                     region = new_region
             continue
         if not focus_prompted:
-            # The LEVEL is now loaded, so the game panel exists. THIS is the moment
-            # to click it for keyboard focus (clicking the intro earlier focused the
-            # wrong panel). One click; focus then holds for the whole session.
-            log("=" * 62)
-            log(">>> The level is up. CLICK once inside the GAME FIELD now <<<")
-            log("    (the dark play area with the cart - NOT the title/menu).")
-            log("    That focuses the game so A/D/Space land. Continuing in"
-                f" {cfg.focus_click_wait:.0f}s...")
-            log("=" * 62)
-            fend = time.time() + cfg.focus_click_wait
-            while running and time.time() < fend:
-                time.sleep(0.5)
-            foc, _a = keyboard_focus_state()
-            log(f"  continuing (kbFocus={foc} root={_hwnd}).")
+            if _use_post:
+                # Keys go via PostMessage straight to the window - no focus/click
+                # needed. If this works the cart moves with NO clicking at all.
+                log("  input: PostMessage (focus-free). NO click needed - if the")
+                log("  cart moves, we're done. If it doesn't move AT ALL, tell me")
+                log("  and I'll switch to the click-to-focus method.")
+            else:
+                # keyboard-lib mode needs real focus: click the GAME panel (which
+                # only exists now that a level is loaded; the intro was a different
+                # panel). One click; focus then holds for the session.
+                log("=" * 62)
+                log(">>> The level is up. CLICK once inside the GAME FIELD now <<<")
+                log("    (the dark play area with the cart - NOT the title/menu).")
+                log(f"    Continuing in {cfg.focus_click_wait:.0f}s...")
+                log("=" * 62)
+                fend = time.time() + cfg.focus_click_wait
+                while running and time.time() < fend:
+                    time.sleep(0.5)
             focus_prompted = True
         shot += 1
         log(f"[boot {shot}] lock -> throw -> catch")
