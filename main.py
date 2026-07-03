@@ -258,8 +258,33 @@ def _init_win32():
     u.SetFocus.restype = ctypes.c_void_p
     u.SetFocus.argtypes = [ctypes.c_void_p]
     u.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ULONG_PTR]
+    u.GetGUIThreadInfo.restype = wintypes.BOOL
+    u.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(_GUITHREADINFO)]
     ctypes.windll.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
     _win32_ready = True
+
+
+class _GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                ("rcCaret", wintypes.RECT)]
+
+
+def keyboard_focus_state():
+    """(hwndFocus, hwndActive) in Dota's GUI thread - the REAL keyboard-focus
+    window (not just foreground). This is what tells us if SetFocus actually
+    worked, and whether input goes to _hwnd or to a child (CEF/Panorama) window."""
+    if not _hwnd:
+        return (None, None)
+    u = ctypes.windll.user32
+    tid = u.GetWindowThreadProcessId(_hwnd, None)
+    gti = _GUITHREADINFO()
+    gti.cbSize = ctypes.sizeof(_GUITHREADINFO)
+    if not u.GetGUIThreadInfo(tid, ctypes.byref(gti)):
+        return (None, None)
+    return (gti.hwndFocus, gti.hwndActive)
 
 
 def refresh_hwnd(region):
@@ -290,8 +315,6 @@ def focus_game(tries=4):
     u = ctypes.windll.user32
     cur = ctypes.windll.kernel32.GetCurrentThreadId()
     for _ in range(tries):
-        u.keybd_event(0x12, 0, 0, 0)          # ALT down  (VK_MENU)
-        u.keybd_event(0x12, 0, 0x0002, 0)     # ALT up    (KEYEVENTF_KEYUP)
         tgt = u.GetWindowThreadProcessId(_hwnd, None)
         fg = u.GetForegroundWindow()
         fgt = u.GetWindowThreadProcessId(fg, None) if fg else 0
@@ -439,7 +462,8 @@ def click_play(region, cfg):
     time.sleep(0.15)
     ok = focus_game()
     park_cursor()
-    log(f"  clicked PLAY at ({x},{y}); foreground={'Dota' if ok else 'NOT Dota'}")
+    foc, act = keyboard_focus_state()
+    log(f"  clicked PLAY at ({x},{y}); foreground={'Dota' if ok else 'no'} kbFocus={foc}")
 
 
 def wait_ready(region, cfg):
@@ -742,7 +766,8 @@ def main_loop(cfg, verbose):
     log(f"Field region (absolute): {tuple(int(v) for v in region)}")
     refresh_hwnd(region)
     ok = focus_click(region)                 # click Dota so keys land on it
-    log(f"Focused Dota via click: foreground={'Dota' if ok else 'NOT Dota (may need manual click)'}")
+    foc, act = keyboard_focus_state()
+    log(f"Focused Dota: foreground={'Dota' if ok else 'no'}  kbFocus={foc} active={act} dota_hwnd={_hwnd}")
     # If we're starting on a paused screen (desaturated), tap F9 to resume.
     s0 = detect.scene_saturation(grab_region(region))
     if s0 < cfg.sat_ended:
