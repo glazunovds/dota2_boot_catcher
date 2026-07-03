@@ -253,6 +253,11 @@ def _init_win32():
     u.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
     u.GetWindowThreadProcessId.restype = wintypes.DWORD
     u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    u.SetActiveWindow.restype = ctypes.c_void_p
+    u.SetActiveWindow.argtypes = [ctypes.c_void_p]
+    u.SetFocus.restype = ctypes.c_void_p
+    u.SetFocus.argtypes = [ctypes.c_void_p]
+    u.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ULONG_PTR]
     ctypes.windll.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
     _win32_ready = True
 
@@ -271,18 +276,22 @@ def refresh_hwnd(region):
     return _hwnd
 
 
-def focus_game(tries=3):
-    """Bring the game window to the foreground so key input lands on Dota.
-    Retries because activation right after a synthetic click is async - the
-    window may not report foreground on the first check. Returns True if Dota
-    ends up foreground."""
+def focus_game(tries=4):
+    """Give Dota real KEYBOARD focus (not just foreground). Being the foreground
+    window is NOT enough for a game - injected keys only land once the window
+    has keyboard focus (what a real click grants). So we ALWAYS run the full
+    dance: an Alt-key tap (satisfies the foreground-lock rule), then under
+    AttachThreadInput to Dota's GUI thread call SetForegroundWindow +
+    SetActiveWindow + SetFocus. The old code returned early when Dota was already
+    foreground and so never called SetFocus - that was the 'foreground=Dota but
+    cart won't move' bug. Returns True if Dota ends up foreground."""
     if not _hwnd:
         return False
     u = ctypes.windll.user32
+    cur = ctypes.windll.kernel32.GetCurrentThreadId()
     for _ in range(tries):
-        if u.GetForegroundWindow() == _hwnd:
-            return True
-        cur = ctypes.windll.kernel32.GetCurrentThreadId()
+        u.keybd_event(0x12, 0, 0, 0)          # ALT down  (VK_MENU)
+        u.keybd_event(0x12, 0, 0x0002, 0)     # ALT up    (KEYEVENTF_KEYUP)
         tgt = u.GetWindowThreadProcessId(_hwnd, None)
         fg = u.GetForegroundWindow()
         fgt = u.GetWindowThreadProcessId(fg, None) if fg else 0
@@ -291,13 +300,19 @@ def focus_game(tries=3):
             att_fg = bool(u.AttachThreadInput(cur, fgt, True))
         if tgt and tgt != cur:
             att_tgt = bool(u.AttachThreadInput(cur, tgt, True))
-        u.BringWindowToTop(_hwnd)
-        u.SetForegroundWindow(_hwnd)
-        if att_tgt:
-            u.AttachThreadInput(cur, tgt, False)
-        if att_fg:
-            u.AttachThreadInput(cur, fgt, False)
-        time.sleep(0.05)
+        try:
+            u.BringWindowToTop(_hwnd)
+            u.SetForegroundWindow(_hwnd)
+            u.SetActiveWindow(_hwnd)
+            u.SetFocus(_hwnd)                 # <-- the missing keyboard-focus call
+        finally:
+            if att_tgt:
+                u.AttachThreadInput(cur, tgt, False)
+            if att_fg:
+                u.AttachThreadInput(cur, fgt, False)
+        if u.GetForegroundWindow() == _hwnd:
+            return True
+        time.sleep(0.06)
     return u.GetForegroundWindow() == _hwnd
 
 
