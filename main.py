@@ -230,6 +230,8 @@ def park_cursor():
 
 GA_ROOT = 2
 _hwnd = 0
+_child_hwnd = 0        # deepest window under the field centre (may be the CEF/
+                       # Panorama input window that actually needs keyboard focus)
 _win32_ready = False
 
 
@@ -287,14 +289,29 @@ def keyboard_focus_state():
     return (gti.hwndFocus, gti.hwndActive)
 
 
+def dota_has_kb_focus():
+    """True iff the REAL keyboard-focus window belongs to Dota (its root, the
+    input child, or any descendant of the root). This is the honest check that
+    injected keys will actually land - being 'foreground' is not enough."""
+    foc, _act = keyboard_focus_state()
+    if not foc:
+        return False
+    if foc == _hwnd or foc == _child_hwnd:
+        return True
+    root = ctypes.windll.user32.GetAncestor(foc, GA_ROOT)
+    return bool(root) and root == _hwnd
+
+
 def refresh_hwnd(region):
-    """Find the top-level game window under the play field's centre."""
-    global _hwnd
+    """Find the top-level game window under the play field's centre (and the
+    deepest child there, which may be the real keyboard-input window)."""
+    global _hwnd, _child_hwnd
     _init_win32()
     u = ctypes.windll.user32
     cx = int(region[0] + region[2] // 2)
     cy = int(region[1] + region[3] // 2)
     hwnd = u.WindowFromPoint(_POINT(cx, cy))
+    _child_hwnd = hwnd or 0
     if hwnd:
         root = u.GetAncestor(hwnd, GA_ROOT)
         _hwnd = root or hwnd
@@ -328,6 +345,8 @@ def focus_game(tries=4):
             u.SetForegroundWindow(_hwnd)
             u.SetActiveWindow(_hwnd)
             u.SetFocus(_hwnd)                 # <-- the missing keyboard-focus call
+            if _child_hwnd and _child_hwnd != _hwnd:
+                u.SetFocus(_child_hwnd)       # the CEF/Panorama input child, if any
         finally:
             if att_tgt:
                 u.AttachThreadInput(cur, tgt, False)
@@ -765,9 +784,19 @@ def main_loop(cfg, verbose):
         return
     log(f"Field region (absolute): {tuple(int(v) for v in region)}")
     refresh_hwnd(region)
-    ok = focus_click(region)                 # click Dota so keys land on it
-    foc, act = keyboard_focus_state()
-    log(f"Focused Dota: foreground={'Dota' if ok else 'no'}  kbFocus={foc} active={act} dota_hwnd={_hwnd}")
+    focus_click(region)                      # try to auto-focus Dota
+    if not dota_has_kb_focus():
+        # Auto-focus into a game from a background process is unreliable (Windows
+        # foreground-lock + the game's own input handling). Fall back to the one
+        # thing that ALWAYS works - a real click - and detect it via GUIThreadInfo.
+        log("  auto-focus didn't grab keyboard.  >>> CLICK once inside the Dota")
+        log("      minigame now <<<  - I'll detect it and start (waiting 30s).")
+        deadline = time.time() + 30
+        while running and time.time() < deadline and not dota_has_kb_focus():
+            time.sleep(0.3)
+    foc, _a = keyboard_focus_state()
+    log(f"Keyboard focus: {'Dota - keys will land' if dota_has_kb_focus() else 'NOT Dota - keys may be lost'}"
+        f"  (kbFocus={foc} root={_hwnd} child={_child_hwnd})")
     # If we're starting on a paused screen (desaturated), tap F9 to resume.
     s0 = detect.scene_saturation(grab_region(region))
     if s0 < cfg.sat_ended:
