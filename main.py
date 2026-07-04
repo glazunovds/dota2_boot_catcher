@@ -753,6 +753,8 @@ def catch_phase(region, cfg):
     det_hist = []                    # consecutive accepted dets (t, x, y) for the
                                      # impossible-track breakers
     blacklist = []                   # (x, y, t_until) dead spots find_boot must skip
+    small_run = 0                    # consecutive accepted dets under the boot-size
+                                     # floor (coin chains must not sustain a lock)
     target_x = None                  # boot's last SEEN x = the steer target
     cx = None                        # smoothed cart x
     cx_prev = None                   # for cart-velocity (overshoot damping)
@@ -813,7 +815,13 @@ def catch_phase(region, cfg):
             # splinters below 250 and a flat floor blinded the tracker at the
             # decisive moment twice in run_20260704e. Steals need the lost>=3
             # window, which keeps the big floor.
-            min_a = cfg.track_keep_min_area if (tracking and lost <= 2) \
+            # ...and small dets may only BRIDGE a lock, not sustain it: a chain
+            # of small accepts keeps lost at 0, so falling coins rode a
+            # "healthy" lock for 17 straight dets once. After small_keep_max
+            # consecutive smalls the floor snaps back to boot-sized until a
+            # real >=250px det re-anchors the track.
+            min_a = cfg.track_keep_min_area if (
+                tracking and lost <= 2 and small_run < cfg.small_keep_max) \
                 else cfg.reacquire_min_area
             det, prev_gray = detect.find_boot(
                 panel, prev_gray, cfg, roi, gray=gray, min_area=min_a,
@@ -850,6 +858,7 @@ def catch_phase(region, cfg):
                 ever_seen = True
                 target_x = dx
                 last_seen_wall = now
+                small_run = small_run + 1 if det[2] < cfg.reacquire_min_area else 0
                 # Impossible-track breakers: some gold blocks have an ANIMATED
                 # shine, so they pass motion+color and can steal the lock while
                 # the boot flies on. Two motions a real boot never makes:
@@ -877,6 +886,7 @@ def catch_phase(region, cfg):
                     log(f"  catch: broke {broke} at ({dx},{int(dy)}) - blacklisted, re-acquiring")
                     blacklist.append((float(dx), float(dy), now + cfg.blacklist_secs))
                     det_hist = []
+                    small_run = 0
                     bx = by = None
                     bvx = bvy = 0.0
                     seen = 0
@@ -908,6 +918,7 @@ def catch_phase(region, cfg):
                             blacklist.append((det_prev[1], det_prev[2],
                                               now + cfg.blacklist_secs))
                     det_hist = []
+                    small_run = 0
                     bx = by = None
                     bvx = bvy = 0.0
                     seen = 0

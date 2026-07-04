@@ -97,6 +97,13 @@ class Config:
     # blind windows). Coins/debris steals need the lost>=3 window, which keeps
     # the big floor.
     track_keep_min_area: int = 120
+    # ...for at most this many CONSECUTIVE small dets: a chain of small accepts
+    # keeps lost at 0, so a coin-fall can sustain a "healthy" lock forever
+    # (run_20260704f boot 9: 17 straight 154-199px dets rode coins from y=297
+    # to 759 while the boot flew elsewhere). Small dets may BRIDGE a lock, not
+    # live on it - the boot re-anchors with a >=250px det within 1-3 frames,
+    # coins never can.
+    small_keep_max: int = 4
 
     # --- Boot TRACKER (ROI search + outlier gate, ported from the Rust bot) ---
     # Once locked, search only a box around the boot's predicted position; this
