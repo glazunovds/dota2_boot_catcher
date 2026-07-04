@@ -65,6 +65,13 @@ class Config:
     boot_s_min: int = 35
     boot_v_min: int = 40
     boot_search_bottom: float = 0.84   # ignore the cart band (cart trim moves too)
+    # When the CART POSITION IS KNOWN (catch phase), search deeper and mask only
+    # a rectangle around the cart instead of amputating the whole band: the boot
+    # is visible down to ~0.93H, and those last ~100px are where fast descents
+    # deflect (run_20260704b miss: the boot was at (440,979) while the masked
+    # tracker steered to a stale 483 - the frames had the answer all along).
+    boot_search_bottom_ext: float = 0.93
+    cart_mask_halfw: float = 125.0     # half-width of the cart mask rectangle
     boot_side_margin: float = 0.07     # ignore the animated claw/jester at edges
     boot_min_area: int = 35         # Rust-bot parity; the GO!-arrow trim (15px)
                                     # was accepted as a "boot" below this

@@ -807,7 +807,8 @@ def catch_phase(region, cfg):
             det, prev_gray = detect.find_boot(
                 panel, prev_gray, cfg, roi, gray=gray,
                 min_area=None if tracking else cfg.reacquire_min_area,
-                exclude=[(bx_, by_, cfg.blacklist_r) for bx_, by_, _ in blacklist])
+                exclude=[(bx_, by_, cfg.blacklist_r) for bx_, by_, _ in blacklist],
+                cart_x=cart if cart is not None else cx)
 
             # 2) Gate: reject a detection implausibly far from the prediction.
             if det is not None and pred_x is not None and seen >= 2 and lost <= 6:

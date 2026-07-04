@@ -152,7 +152,7 @@ def to_gray(bgr):
 
 
 def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
-              exclude=None):
+              exclude=None, cart_x=None):
     """Locate the in-flight boot. Returns ((x, y, area) or None, gray).
 
     The boot is found as *moving* pixels that are boot-orange (its body). Two
@@ -179,6 +179,10 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
     falling pickups would otherwise be grabbed while the gate is off).
     `exclude` is a list of (x, y, radius) dead spots - candidates centred there
     are skipped (used to blacklist shimmer blocks that stole the lock).
+    `cart_x` (panel px): when the cart position is known, the search extends
+    down to boot_search_bottom_ext with only a cart-sized rectangle masked,
+    instead of cutting the whole band - the final ~100px of a descent is where
+    fast boots deflect, and the whole-band cut made the endgame blind.
     """
     if gray is None:
         gray = to_gray(panel_bgr)
@@ -192,7 +196,14 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
     orange = ((hh >= cfg.boot_h_lo) & (hh <= cfg.boot_h_hi) &
               (ss >= cfg.boot_s_min) & (vv >= cfg.boot_v_min))
     boot = ((motion > 0) & orange).astype(np.uint8) * 255
-    boot[int(h * cfg.boot_search_bottom):] = 0        # ignore the cart band
+    cut = int(h * cfg.boot_search_bottom)
+    if cart_x is None:
+        boot[cut:] = 0                                # ignore the whole cart band
+    else:                                             # deep search, cart masked
+        boot[int(h * cfg.boot_search_bottom_ext):] = 0
+        cx0 = max(0, int(cart_x - cfg.cart_mask_halfw))
+        cx1 = min(w, int(cart_x + cfg.cart_mask_halfw))
+        boot[cut:, cx0:cx1] = 0
     m = int(w * cfg.boot_side_margin)                 # ignore the animated
     boot[:, :m] = 0                                    # claw/jester/pole at the
     boot[:, w - m:] = 0                                # field edges
