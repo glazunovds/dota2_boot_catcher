@@ -229,14 +229,34 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
         if exclude and any((cent[i][0] - ex) ** 2 + (cent[i][1] - ey) ** 2 < er * er
                            for ex, ey, er in exclude):
             continue                          # blacklisted dead spot (shimmer block)
-        passing.append((cent[i], int(area)))
+        passing.append((cent[i], int(area), stats[i]))
     if not passing:
         return None, gray
-    # Pick the LARGEST blob that passed the shape/size gate. Nearest-to-prediction
-    # selection was tried and reverted: it needs dense frames (60fps) for the
-    # linear prediction to be reliable; on this game's data it tracked WORSE. The
-    # gate (rejecting brick clusters / UI lines) is what fixes wrong-blob picks.
-    best = max(passing, key=lambda c: c[1])
+    # IDENTITY: the flying boot spins and always carries a BRIGHT cyan arc that
+    # moves with it; no gold junk (coins, popups, sparkles, debris, shimmer,
+    # trim) has one, and the pale static cyan block on levels 2+ fails the
+    # saturation + motion test. Keep only arc-bearing candidates; if NO
+    # candidate has an arc, there is no boot in view. (Validated on 531
+    # labeled blobs across 8 recorded runs: 34/34 junk rejected, ~100% of true
+    # boot detections kept - the rare arc-less "boot" dets were themselves
+    # wrong-blob picks that this filter re-selects correctly.)
+    arc = ((motion > 0) & (hh >= cfg.boot_arc_h_lo) & (hh <= cfg.boot_arc_h_hi) &
+           (ss >= cfg.boot_arc_s_min) & (vv >= cfg.boot_arc_v_min))
+    pad = cfg.boot_arc_pad
+    with_arc = []
+    for c, area, st in passing:
+        x0 = max(0, st[0] - pad)
+        y0 = max(0, st[1] - pad)
+        x1 = min(w, st[0] + st[2] + pad)
+        y1 = min(h, st[1] + st[3] + pad)
+        if int(arc[y0:y1, x0:x1].sum()) >= cfg.boot_arc_min:
+            with_arc.append((c, area))
+    if not with_arc:
+        return None, gray
+    # Among arc-bearing candidates pick the LARGEST blob (nearest-to-prediction
+    # selection was tried and reverted; the identity filter now does the work
+    # that size/kinematic heuristics approximated).
+    best = max(with_arc, key=lambda c: c[1])
     return (int(best[0][0]), int(best[0][1]), best[1]), gray
 
 

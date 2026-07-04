@@ -874,7 +874,8 @@ def catch_phase(region, cfg):
                             and max(ys) - min(ys) < cfg.brk_static_box
                             and dw[-1][0] - dw[0][0] >= cfg.brk_static_secs):
                         broke = "static lock (sparkle/shine)"
-                if broke is None and len(det_hist) >= cfg.brk_column_dets:
+                if (cfg.brk_junk_kinematics and broke is None
+                        and len(det_hist) >= cfg.brk_column_dets):
                     dw = det_hist[-cfg.brk_column_dets:]
                     xs = [p[1] for p in dw]
                     ys = [p[2] for p in dw]
@@ -882,7 +883,8 @@ def catch_phase(region, cfg):
                             and ys[-1] - ys[0] > cfg.brk_column_descent
                             and cfg.brk_column_edge <= dx <= w - cfg.brk_column_edge):
                         broke = "column walk (shine wave)"
-                if broke is None and len(det_hist) >= cfg.brk_coin_dets:
+                if (cfg.brk_junk_kinematics and broke is None
+                        and len(det_hist) >= cfg.brk_coin_dets):
                     dw = det_hist[-cfg.brk_coin_dets:]
                     med = sorted(p[3] for p in dw)[len(dw) // 2]
                     if (med < cfg.brk_coin_med

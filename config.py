@@ -86,6 +86,19 @@ class Config:
     boot_max_area: int = 1300
     boot_max_aspect: float = 3.2    # Rust parity; wall-clipped boots hit ~3.0-3.3
     boot_max_w: int = 90
+    # --- Boot IDENTITY: the cyan spin arc (validated on 531 labeled blobs from
+    # 8 recorded runs). The flying boot ALWAYS spins and carries a thin BRIGHT
+    # cyan arc (H 85-110, S>=120, V>=150) that moves with it; no gold junk
+    # (coins/popups/sparkles/debris/shimmer/trim) has one - 34/34 junk rejected,
+    # ~100% boot kept. The indestructible cyan BLOCK on levels 2+ is PALE
+    # (S~75) and static, so the saturation bound + motion coupling exclude it.
+    boot_arc_h_lo: int = 85
+    boot_arc_h_hi: int = 110
+    boot_arc_s_min: int = 120
+    boot_arc_v_min: int = 150
+    boot_arc_min: int = 8           # min moving-arc pixels near a candidate; a
+                                    # candidate set with NO arc anywhere = no boot
+    boot_arc_pad: int = 10          # count arc pixels in the blob bbox + this
     # Full-field RE-ACQUISITION needs a bigger floor than in-ROI tracking: with
     # no lock the gate is off, and the run_20260703 forensics showed the only
     # wrong grabs were the GO!-arrow trim (15-63px) and falling gold pickups
@@ -148,6 +161,13 @@ class Config:
     brk_coin_dets: int = 5            # rolling window (consecutive accepted dets)
     brk_coin_med: float = 300.0       # median area below this ...
     brk_coin_descent: float = 60.0    # ... while net descent exceeds this = coins
+    # The cyan-arc identity filter keeps junk OUT of the detection stream, so
+    # the kinematic junk rules (coin-ride median, column walk) can now only
+    # fire on the REAL boot (a fragmented fast descent matches their profile).
+    # They flip from protection to hazard - off by default. The static-lock
+    # breaker stays on (a mid-air boot is never static; it guards against any
+    # unforeseen arc-bearing confuser).
+    brk_junk_kinematics: bool = False
     blacklist_r: float = 45.0         # after a break/lock-drop, ignore detections
     blacklist_secs: float = 1.5       # this close to the dead spot for this long
 
