@@ -91,6 +91,12 @@ class Config:
     # wrong grabs were the GO!-arrow trim (15-63px) and falling gold pickups
     # (90-243px) - a real boot in open flight is 374-731px.
     reacquire_min_area: int = 250
+    # ...but a HEALTHY lock (lost<=2, fresh prediction) may keep itself alive on
+    # smaller blobs: a fast boot fragments below 250 and a flat floor blinded
+    # the tracker at decisive moments (run_20260704e rallies 0/12 died in such
+    # blind windows). Coins/debris steals need the lost>=3 window, which keeps
+    # the big floor.
+    track_keep_min_area: int = 120
 
     # --- Boot TRACKER (ROI search + outlier gate, ported from the Rust bot) ---
     # Once locked, search only a box around the boot's predicted position; this
