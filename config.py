@@ -73,9 +73,10 @@ class Config:
     # that "largest blob" used to grab: brick clusters (~1696px, 66x32) and the
     # aim-trajectory / UI lines (258x3, aspect ~80). The spinning boot stays
     # compact so it passes, and rejecting the big/wide blobs stops the lock-ups.
-    # Ceiling 1600: above the measured true-boot MAX (1451; 1300 clipped its
-    # tail) but still under the ~1696px brick clusters.
-    boot_max_area: int = 1600
+    # Ceiling 1300 (validated): raising it to 1600 to cover the measured
+    # true-boot max (1451) let a 1258px shimmer-block/brick blob steal the lock
+    # at a rally's end - the clipped boot tail is the cheaper loss.
+    boot_max_area: int = 1300
     boot_max_aspect: float = 3.2    # Rust parity; wall-clipped boots hit ~3.0-3.3
     boot_max_w: int = 90
     # Full-field RE-ACQUISITION needs a bigger floor than in-ROI tracking: with
@@ -103,6 +104,23 @@ class Config:
                                       # many fresh lost frames
     frame_stale_eps: float = 0.05     # mean gray absdiff below this = the game
                                       # hasn't rendered a new frame; skip the tick
+    # --- Impossible-track breakers (run_20260704 failure: some gold blocks have
+    # an ANIMATED shine, so they pass motion+color and can steal the lock; the
+    # boot then flies on while the tracker rides a static block / walks down a
+    # shimmering column). Both rules validated on the recorded telemetry:
+    # the static rule fired 4x in 11 old rallies (all at confuser spots, never
+    # at catch-line contacts or bounce apexes), the column rule fired ONLY on
+    # the actual gold-block column rides in each run.
+    brk_static_dets: int = 5          # this many consecutive dets ...
+    brk_static_box: float = 14.0      # ... inside a box this size ...
+    brk_static_secs: float = 0.25     # ... spanning at least this long = not a boot
+    brk_column_dets: int = 12         # this many consecutive dets ...
+    brk_column_xrange: float = 20.0   # ... in a column this narrow ...
+    brk_column_descent: float = 250.0 # ... descending this far = shine wave, not boot
+    brk_column_edge: float = 80.0     # column rule only for interior x (pole-hugging
+                                      # boot descents are real and near-vertical)
+    blacklist_r: float = 45.0         # after a break/lock-drop, ignore detections
+    blacklist_secs: float = 1.5       # this close to the dead spot for this long
 
     # --- Catch phase (follow the boot with the cart after the throw) ---
     catch_lead: float = 2.0        # frames of boot velocity to aim ahead of it

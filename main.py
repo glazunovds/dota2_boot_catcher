@@ -749,6 +749,9 @@ def catch_phase(region, cfg):
     seen = 0                         # consecutive accepted dets (tracker age)
     ever_seen = False
     breakthrough = False             # boot exited the TOP = level complete
+    det_hist = []                    # consecutive accepted dets (t, x, y) for the
+                                     # impossible-track breakers
+    blacklist = []                   # (x, y, t_until) dead spots find_boot must skip
     target_x = None                  # boot's last SEEN x = the steer target
     cx = None                        # smoothed cart x
     cx_prev = None                   # for cart-velocity (overshoot damping)
@@ -800,9 +803,11 @@ def catch_phase(region, cfg):
                 speed = (bvx * bvx + bvy * bvy) ** 0.5
                 radius = cfg.boot_roi_pad + speed * cfg.boot_roi_speed + lost * cfg.boot_roi_lost_grow
                 roi = (pred_x - radius, pred_y - radius, pred_x + radius, pred_y + radius)
+            blacklist = [b for b in blacklist if now < b[2]]
             det, prev_gray = detect.find_boot(
                 panel, prev_gray, cfg, roi, gray=gray,
-                min_area=None if tracking else cfg.reacquire_min_area)
+                min_area=None if tracking else cfg.reacquire_min_area,
+                exclude=[(bx_, by_, cfg.blacklist_r) for bx_, by_, _ in blacklist])
 
             # 2) Gate: reject a detection implausibly far from the prediction.
             if det is not None and pred_x is not None and seen >= 2 and lost <= 6:
@@ -834,6 +839,38 @@ def catch_phase(region, cfg):
                 ever_seen = True
                 target_x = dx
                 last_seen_wall = now
+                # Impossible-track breakers: some gold blocks have an ANIMATED
+                # shine, so they pass motion+color and can steal the lock while
+                # the boot flies on. Two motions a real boot never makes:
+                det_hist.append((now, float(dx), float(dy)))
+                if len(det_hist) > 16:
+                    det_hist.pop(0)
+                broke = None
+                if len(det_hist) >= cfg.brk_static_dets:
+                    dw = det_hist[-cfg.brk_static_dets:]
+                    xs = [p[1] for p in dw]
+                    ys = [p[2] for p in dw]
+                    if (max(xs) - min(xs) < cfg.brk_static_box
+                            and max(ys) - min(ys) < cfg.brk_static_box
+                            and dw[-1][0] - dw[0][0] >= cfg.brk_static_secs):
+                        broke = "static lock (sparkle/shine)"
+                if broke is None and len(det_hist) >= cfg.brk_column_dets:
+                    dw = det_hist[-cfg.brk_column_dets:]
+                    xs = [p[1] for p in dw]
+                    ys = [p[2] for p in dw]
+                    if (max(xs) - min(xs) < cfg.brk_column_xrange
+                            and ys[-1] - ys[0] > cfg.brk_column_descent
+                            and cfg.brk_column_edge <= dx <= w - cfg.brk_column_edge):
+                        broke = "column walk (shine wave)"
+                if broke:
+                    log(f"  catch: broke {broke} at ({dx},{int(dy)}) - blacklisted, re-acquiring")
+                    blacklist.append((float(dx), float(dy), now + cfg.blacklist_secs))
+                    det_hist = []
+                    bx = by = None
+                    bvx = bvy = 0.0
+                    seen = 0
+                    det_prev = None
+                    target_x = None
             else:
                 lost += 1
                 if bx is not None and last_t is not None:
@@ -850,6 +887,16 @@ def catch_phase(region, cfg):
                         and bvy < cfg.exit_top_vy and lost >= cfg.exit_top_lost):
                     breakthrough = True
                 if lost > cfg.boot_lost_keep:         # drop the lock, re-acquire
+                    if det_prev is not None and len(det_hist) >= 3:
+                        xs = [p[1] for p in det_hist[-3:]]
+                        ys = [p[2] for p in det_hist[-3:]]
+                        if max(xs) - min(xs) < 25 and max(ys) - min(ys) < 25:
+                            # the lock died going NOWHERE = a dead spot (shimmer
+                            # block / sparkle), not a moving boot that got
+                            # occluded - keep re-acquisition off it for a while
+                            blacklist.append((det_prev[1], det_prev[2],
+                                              now + cfg.blacklist_secs))
+                    det_hist = []
                     bx = by = None
                     bvx = bvy = 0.0
                     seen = 0

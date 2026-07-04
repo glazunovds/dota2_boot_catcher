@@ -151,7 +151,8 @@ def to_gray(bgr):
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
 
-def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None):
+def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
+              exclude=None):
     """Locate the in-flight boot. Returns ((x, y, area) or None, gray).
 
     The boot is found as *moving* pixels that are boot-orange (its body). Two
@@ -176,6 +177,8 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None):
     `gray` may pass a precomputed grayscale of panel_bgr; `min_area` raises the
     minimum blob size (used for full-field re-acquisition, where tiny UI trim /
     falling pickups would otherwise be grabbed while the gate is off).
+    `exclude` is a list of (x, y, radius) dead spots - candidates centred there
+    are skipped (used to blacklist shimmer blocks that stole the lock).
     """
     if gray is None:
         gray = to_gray(panel_bgr)
@@ -212,6 +215,9 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None):
         asp = max(bw, bh) / max(1, min(bw, bh))
         if asp > cfg.boot_max_aspect or bw > cfg.boot_max_w:
             continue                          # wide/thin = aim-trajectory or UI line
+        if exclude and any((cent[i][0] - ex) ** 2 + (cent[i][1] - ey) ** 2 < er * er
+                           for ex, ey, er in exclude):
+            continue                          # blacklisted dead spot (shimmer block)
         passing.append((cent[i], int(area)))
     if not passing:
         return None, gray
