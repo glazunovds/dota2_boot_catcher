@@ -586,24 +586,25 @@ def play_level(region, cfg, verbose):
         log("  boot already airborne - catching without a throw")
         catch_phase(region, cfg)
         return
-    # 2) lock + throw: press Space until the boot actually launches. This one
-    # loop covers the normal lock->throw pair AND the case (common on the first
-    # boot after PLAY) where a press gets eaten during the level fade-in.
-    launched = False
-    for i in range(cfg.throw_max_presses):
-        if not running:
-            break
-        snap(region, cfg, "space")
-        log(f"  Space press {i + 1}")
-        tap('space', cfg.space_hold)
-        if boot_launched(region, cfg, cfg.launch_wait):
-            log(f"  boot launched after {i + 1} press(es)")
-            launched = True
-            break
-        time.sleep(cfg.post_lock_delay)
-    if not launched:
-        log("  boot never launched - giving up this attempt")
+    # 2) lock + throw: exactly TWO Space presses (lock, then throw), then watch.
+    # NO launch confirmation: run_20260704c proved the confirm loop is worse
+    # than useless - the real throw happens on press 1-2 and the boot flies
+    # UNWATCHED while boot_launched polls; the animated "+50" score popups from
+    # that very flight (gold, up to 1248px, at y~560 - above the launch_min_y
+    # line) then false-confirm the launch on press 4-5, and catch_phase starts
+    # on an EMPTY field, chasing popups. If a press gets eaten (level fade-in),
+    # the catch phase just sees nothing for boot_lost_secs (~1.4s) and the main
+    # loop comes straight back here for another pair - a ~4s recovery beats an
+    # unwatched flight every time.
+    snap(region, cfg, "space")
+    log("  Space (lock)")
+    tap('space', cfg.space_hold)
+    time.sleep(cfg.post_lock_delay)
+    if not running:
         return
+    snap(region, cfg, "space")
+    log("  Space (throw) - catching")
+    tap('space', cfg.space_hold)
 
     # 3) catch phase: follow the boot with the cart until it's gone
     catch_phase(region, cfg)
