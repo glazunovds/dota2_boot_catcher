@@ -805,9 +805,16 @@ def catch_phase(region, cfg):
                 radius = cfg.boot_roi_pad + speed * cfg.boot_roi_speed + lost * cfg.boot_roi_lost_grow
                 roi = (pred_x - radius, pred_y - radius, pred_x + radius, pred_y + radius)
             blacklist = [b for b in blacklist if now < b[2]]
+            # Boot-sized blobs ONLY - also while locked. Every lock thief on
+            # record is small (coins 104-238px, falling debris 81-199, cart/UI
+            # trim 15-63) while the flying boot is 450-714; rejecting the small
+            # stuff means a steal becomes a clean coast/lock-drop and the
+            # full-field re-acquire grabs the real boot the moment it reappears
+            # (run_20260704d: the cart was dragged 250px away chasing coins
+            # while the boot came down perfectly visible).
             det, prev_gray = detect.find_boot(
                 panel, prev_gray, cfg, roi, gray=gray,
-                min_area=None if tracking else cfg.reacquire_min_area,
+                min_area=cfg.reacquire_min_area,
                 exclude=[(bx_, by_, cfg.blacklist_r) for bx_, by_, _ in blacklist],
                 cart_x=cart if cart is not None else cx)
 
