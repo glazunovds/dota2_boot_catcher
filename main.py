@@ -47,6 +47,7 @@ running = False       # True while a game is being played
 stop_flag = True      # keeps the 'q' listener thread alive
 _held = None          # currently held movement key ('a'/'d') or None
 _dbg_dir = None       # set to a folder path to dump annotated frames
+_manual = False       # --manual: never click / grab foreground; user owns focus
 _dbg_n = 0
 _sct = None           # lazily-opened mss capture handle
 _log_f = None         # optional log file handle
@@ -560,7 +561,8 @@ def wait_ready(region, cfg):
 
 
 def play_level(region, cfg, verbose):
-    bring_foreground()   # PostMessage keys only work when Dota is the active window
+    if not _manual:      # manual mode: the user owns focus/foreground entirely
+        bring_foreground()   # PostMessage keys only work when Dota is active
     # 1) optionally position the cart under the bricks. OFF by default: A/D only
     # moves the cart on the LOCK screen; on the THROW screen it rotates the aim,
     # and the two screens can't be told apart reliably, so positioning risks
@@ -738,9 +740,15 @@ def catch_phase(region, cfg):
     bx = by = None                   # tracked boot position (px), None = no lock
     bvx = bvy = 0.0                  # tracked boot velocity (px/s)
     last_t = None
-    lost = 0                         # consecutive frames without an accepted det
+    det_prev = None                  # (t, x, y) of the last ACCEPTED detection -
+                                     # velocity is measured between accepted dets,
+                                     # NOT against the coasted state (dividing a
+                                     # relock residual by one 36ms tick injected
+                                     # up to 5956 px/s and ran the coast off-field)
+    lost = 0                         # consecutive FRESH frames without an accepted det
     seen = 0                         # consecutive accepted dets (tracker age)
     ever_seen = False
+    breakthrough = False             # boot exited the TOP = level complete
     target_x = None                  # boot's last SEEN x = the steer target
     cx = None                        # smoothed cart x
     cx_prev = None                   # for cart-velocity (overshoot damping)
@@ -754,67 +762,99 @@ def catch_phase(region, cfg):
         now = time.time()
         sat = detect.scene_saturation(panel)
         if sat < cfg.sat_ended:                       # level ended (loading dip)
-            log("  catch: level ended (loading dip)")
+            log(f"  catch: level ended (loading dip){' after breakthrough' if breakthrough else ''}")
             break
-        cart = detect.find_cart_x(panel, cfg)
-        if cart is not None:                          # smooth the noisy cart read
-            new_cx = cart if cx is None else cfg.catch_cart_smooth * cx + (1 - cfg.catch_cart_smooth) * cart
-            if cx_prev is not None and now > t_cx:
-                cart_vx = 0.5 * cart_vx + 0.5 * (new_cx - cx_prev) / (now - t_cx)
-            cx = new_cx
-            cx_prev = new_cx
-            t_cx = now
 
-        # 1) Predict where the boot should be now, and (if locked) search only a
-        #    box around it. No lock yet -> search the whole field to re-acquire.
-        tracking = bx is not None and lost <= cfg.boot_lost_keep
-        pred_x = pred_y = None
-        roi = None
-        if tracking and last_t is not None:
-            dt = now - last_t
-            pred_x = bx + bvx * dt
-            pred_y = by + bvy * dt
-            speed = (bvx * bvx + bvy * bvy) ** 0.5
-            radius = cfg.boot_roi_pad + speed * cfg.boot_roi_speed + lost * cfg.boot_roi_lost_grow
-            roi = (pred_x - radius, pred_y - radius, pred_x + radius, pred_y + radius)
-        det, prev_gray = detect.find_boot(panel, prev_gray, cfg, roi)
+        # 0) Stale-capture check: the bot polls ~28/s but the game renders at
+        # 15-20fps, so ~1/3 of grabs are pixel-identical to the previous render.
+        # Those ticks carry NO information - running detection is a guaranteed
+        # miss (motion mask empty) and counting them as "lost" burned the
+        # 12-frame lock budget in 0.43s of wall time. Skip them entirely: no
+        # detection, no lost++, no coasting (the boot didn't move either).
+        gray = detect.to_gray(panel)
+        stale = (prev_gray is not None and prev_gray.shape == gray.shape and
+                 float(cv2.absdiff(gray, prev_gray).mean()) < cfg.frame_stale_eps)
+        det = None
+        cart = None
+        if not stale:
+            cart = detect.find_cart_x(panel, cfg)
+            if cart is not None:                      # smooth the noisy cart read
+                new_cx = cart if cx is None else cfg.catch_cart_smooth * cx + (1 - cfg.catch_cart_smooth) * cart
+                if cx_prev is not None and now > t_cx:
+                    cart_vx = 0.5 * cart_vx + 0.5 * (new_cx - cx_prev) / (now - t_cx)
+                cx = new_cx
+                cx_prev = new_cx
+                t_cx = now
 
-        # 2) Gate: reject a detection implausibly far from the prediction.
-        if det is not None and pred_x is not None and seen >= 2 and lost <= 6:
-            dist = ((det[0] - pred_x) ** 2 + (det[1] - pred_y) ** 2) ** 0.5
-            speed = (bvx * bvx + bvy * bvy) ** 0.5
-            gate = cfg.boot_gate_base + speed * 0.12 + lost * cfg.boot_gate_lost
-            if dist > gate:
-                det = None
-
-        # 3) Update the tracker (smoothed velocity) or coast the estimate.
-        if det is not None:
-            dx, dy = det[0], det[1]
-            if bx is not None and last_t is not None and now > last_t:
+            # 1) Predict where the boot should be now, and (if locked) search only
+            #    a box around it. No lock yet -> search the whole field, with a
+            #    boot-sized area floor (the gate is off while seen<2, and tiny UI
+            #    trim / falling gold pickups seeded every phantom lock on record).
+            tracking = bx is not None and lost <= cfg.boot_lost_keep
+            pred_x = pred_y = None
+            roi = None
+            if tracking and last_t is not None:
                 dt = now - last_t
-                bvx = 0.55 * bvx + 0.45 * (dx - bx) / dt
-                bvy = 0.55 * bvy + 0.45 * (dy - by) / dt
-            else:
-                bvx = bvy = 0.0
-            bx, by = float(dx), float(dy)
-            last_t = now
-            lost = 0
-            seen += 1
-            ever_seen = True
-            target_x = dx
-            last_seen_wall = now
-        else:
-            lost += 1
-            if bx is not None and last_t is not None:     # coast the estimate on
-                dt = now - last_t
-                bx += bvx * dt
-                by += bvy * dt
+                pred_x = bx + bvx * dt
+                pred_y = by + bvy * dt
+                speed = (bvx * bvx + bvy * bvy) ** 0.5
+                radius = cfg.boot_roi_pad + speed * cfg.boot_roi_speed + lost * cfg.boot_roi_lost_grow
+                roi = (pred_x - radius, pred_y - radius, pred_x + radius, pred_y + radius)
+            det, prev_gray = detect.find_boot(
+                panel, prev_gray, cfg, roi, gray=gray,
+                min_area=None if tracking else cfg.reacquire_min_area)
+
+            # 2) Gate: reject a detection implausibly far from the prediction.
+            if det is not None and pred_x is not None and seen >= 2 and lost <= 6:
+                dist = ((det[0] - pred_x) ** 2 + (det[1] - pred_y) ** 2) ** 0.5
+                speed = (bvx * bvx + bvy * bvy) ** 0.5
+                gate = cfg.boot_gate_base + speed * 0.12 + lost * cfg.boot_gate_lost
+                if dist > gate:
+                    det = None
+
+            # 3) Update the tracker (smoothed velocity) or coast the estimate.
+            if det is not None:
+                dx, dy = det[0], det[1]
+                if det_prev is not None and now > det_prev[0]:
+                    ddt = now - det_prev[0]           # time since last ACCEPTED det
+                    bvx = 0.55 * bvx + 0.45 * (dx - det_prev[1]) / ddt
+                    bvy = 0.55 * bvy + 0.45 * (dy - det_prev[2]) / ddt
+                    sp = (bvx * bvx + bvy * bvy) ** 0.5
+                    if sp > cfg.boot_vmax:            # physical clamp: real boot
+                        k = cfg.boot_vmax / sp        # tops out ~1300 px/s
+                        bvx *= k
+                        bvy *= k
+                else:
+                    bvx = bvy = 0.0
+                bx, by = float(dx), float(dy)
+                det_prev = (now, float(dx), float(dy))
                 last_t = now
-            if lost > cfg.boot_lost_keep:                 # drop the lock, re-acquire
-                bx = by = None
-                bvx = bvy = 0.0
-                seen = 0
-                target_x = None
+                lost = 0
+                seen += 1
+                ever_seen = True
+                target_x = dx
+                last_seen_wall = now
+            else:
+                lost += 1
+                if bx is not None and last_t is not None:
+                    if lost <= cfg.boot_freeze_lost:  # coast briefly, then FREEZE:
+                        dt = now - last_t             # a long extrapolation with a
+                        bx += bvx * dt                # noisy velocity walked the
+                        by += bvy * dt                # ROI clean off the field
+                    last_t = now
+                # Breakthrough: the boot punched through the bricks and left
+                # through the TOP of the field - that's how a level is WON (the
+                # game fades to the next layout ~1.3s later). Don't re-acquire
+                # garbage in the meantime; declare success and end the phase.
+                if (det_prev is not None and det_prev[2] < cfg.exit_top_y
+                        and bvy < cfg.exit_top_vy and lost >= cfg.exit_top_lost):
+                    breakthrough = True
+                if lost > cfg.boot_lost_keep:         # drop the lock, re-acquire
+                    bx = by = None
+                    bvx = bvy = 0.0
+                    seen = 0
+                    det_prev = None
+                    target_x = None
 
         # 4) Steer: pure pursuit of the boot's last SEEN x, with hysteresis.
         if target_x is not None and cx is not None and lost <= cfg.boot_lost_keep:
@@ -843,7 +883,11 @@ def catch_phase(region, cfg):
                      cart if cart is not None else "",
                      round(cx, 1) if cx is not None else "",
                      round(target_x, 1) if target_x is not None else "",
-                     round(bvx, 1), round(bvy, 1), lost))
+                     round(bvx, 1), round(bvy, 1), lost,
+                     1 if stale else 0))
+        if breakthrough:
+            log("  catch: BREAKTHROUGH - boot exited the top, level complete!")
+            break
         # End the phase once the boot has been gone a while (caught or dropped).
         if time.time() - last_seen_wall > cfg.boot_lost_secs:
             log(f"  catch: boot gone ({'caught/lost' if ever_seen else 'never seen'})")
@@ -855,10 +899,11 @@ def catch_phase(region, cfg):
         header = not os.path.exists(p)
         with open(p, "a", encoding="utf-8") as f:
             if header:
-                f.write("t,bx,by,det_x,det_area,cart,cx,target,vx,vy,lost\n")
+                f.write("t,bx,by,det_x,det_area,cart,cx,target,vx,vy,lost,stale\n")
             f.write("# --- boot ---\n")
             for r in _tel:
                 f.write(",".join(str(x) for x in r) + "\n")
+    return breakthrough
 
 
 def main_loop(cfg, verbose):
@@ -879,13 +924,20 @@ def main_loop(cfg, verbose):
         return
     log(f"Field region (absolute): {tuple(int(v) for v in region)}")
     refresh_hwnd(region)
-    bring_foreground()
-    # Keys go via PostMessage (no keyboard focus needed), BUT Dota only processes
-    # them when its window is ACTIVE/foreground. The bot brings it to front best-
-    # effort; if keys don't land, keep Dota in front (alt-tab to it, don't switch
-    # to the terminal). No clicking required.
-    log("  >>> Keep the Dota window ACTIVE/in front (don't switch to this terminal)")
-    log("      - PostMessage keys only work when Dota is the foreground window. <<<")
+    if _manual:
+        # Manual mode: no clicks, no foreground grabbing - the user alt-tabs to
+        # Dota and clicks the minigame themselves; the bot only sends Space/A/D.
+        log("  MANUAL mode: focus the minigame yourself (alt-tab to Dota, click")
+        log("  inside the game field once) and keep Dota in front. The bot will")
+        log("  only press Space / A / D - it will never click or steal focus.")
+    else:
+        bring_foreground()
+        # Keys go via PostMessage (no keyboard focus needed), BUT Dota only
+        # processes them when its window is ACTIVE/foreground. The bot brings it
+        # to front best-effort; if keys don't land, keep Dota in front (alt-tab
+        # to it, don't switch to the terminal). No clicking required.
+        log("  >>> Keep the Dota window ACTIVE/in front (don't switch to this terminal)")
+        log("      - PostMessage keys only work when Dota is the foreground window. <<<")
     # If we're starting on a paused screen (desaturated), tap F9 to resume.
     s0 = detect.scene_saturation(grab_region(region))
     if s0 < cfg.sat_ended:
@@ -1084,6 +1136,9 @@ def build_parser():
     p.add_argument("--grab", action="store_true", help="save one screenshot per monitor and exit")
     p.add_argument("--monitor", type=int, help="force capture of mss monitor N (1=first)")
     p.add_argument("--no-auto-play", action="store_true", help="don't auto-click the PLAY button")
+    p.add_argument("--manual", action="store_true",
+                   help="no clicks / no foreground grabbing: YOU focus the minigame "
+                        "and click PLAY; the bot only presses Space/A/D")
     p.add_argument("--no-debug", action="store_true", help="don't save annotated frames while playing")
     p.add_argument("--debug-dir", default="debug")
     p.add_argument("--verbose", "-v", action="store_true")
@@ -1091,13 +1146,16 @@ def build_parser():
 
 
 def main():
-    global _dbg_dir, _log_f
+    global _dbg_dir, _log_f, _manual
     set_dpi_aware()
     args = build_parser().parse_args()
     cfg = load_config()
     if args.monitor is not None:
         cfg.monitor = args.monitor
     if args.no_auto_play:
+        cfg.auto_play = False
+    if args.manual:
+        _manual = True
         cfg.auto_play = False
 
     if args.calibrate:

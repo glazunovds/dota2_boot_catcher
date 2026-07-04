@@ -66,15 +66,23 @@ class Config:
     boot_v_min: int = 40
     boot_search_bottom: float = 0.84   # ignore the cart band (cart trim moves too)
     boot_side_margin: float = 0.07     # ignore the animated claw/jester at edges
-    boot_min_area: int = 15
+    boot_min_area: int = 35         # Rust-bot parity; the GO!-arrow trim (15px)
+                                    # was accepted as a "boot" below this
     # Shape/size gate (from a level-clearing boot's envelope, 336 frames: area
     # p99=1105 max=1451, width p99=70, aspect max 2.67). Rejects NON-boot blobs
     # that "largest blob" used to grab: brick clusters (~1696px, 66x32) and the
     # aim-trajectory / UI lines (258x3, aspect ~80). The spinning boot stays
     # compact so it passes, and rejecting the big/wide blobs stops the lock-ups.
-    boot_max_area: int = 1300
-    boot_max_aspect: float = 2.8
+    # Ceiling 1600: above the measured true-boot MAX (1451; 1300 clipped its
+    # tail) but still under the ~1696px brick clusters.
+    boot_max_area: int = 1600
+    boot_max_aspect: float = 3.2    # Rust parity; wall-clipped boots hit ~3.0-3.3
     boot_max_w: int = 90
+    # Full-field RE-ACQUISITION needs a bigger floor than in-ROI tracking: with
+    # no lock the gate is off, and the run_20260703 forensics showed the only
+    # wrong grabs were the GO!-arrow trim (15-63px) and falling gold pickups
+    # (90-243px) - a real boot in open flight is 374-731px.
+    reacquire_min_area: int = 250
 
     # --- Boot TRACKER (ROI search + outlier gate, ported from the Rust bot) ---
     # Once locked, search only a box around the boot's predicted position; this
@@ -85,6 +93,16 @@ class Config:
     boot_gate_base: float = 170.0     # reject a det this many px from the prediction
     boot_gate_lost: float = 55.0      # + this * lost-frames (looser while unsure)
     boot_lost_keep: int = 12          # keep the lock this many lost frames, then re-acquire
+                                      # (FRESH frames only - stale captures don't count)
+    # Velocity/coast sanity (from run_20260703: real boot tops out ~1300 px/s,
+    # but dividing a relock residual by one 36ms tick injected up to 5956 px/s
+    # and coasted the track to y=3439 - clamping + freezing removed every
+    # out-of-field runaway offline with zero good relocks rejected).
+    boot_vmax: float = 1500.0         # clamp smoothed |velocity| (px/s)
+    boot_freeze_lost: int = 4         # stop coasting (hold position) after this
+                                      # many fresh lost frames
+    frame_stale_eps: float = 0.05     # mean gray absdiff below this = the game
+                                      # hasn't rendered a new frame; skip the tick
 
     # --- Catch phase (follow the boot with the cart after the throw) ---
     catch_lead: float = 2.0        # frames of boot velocity to aim ahead of it
@@ -110,7 +128,15 @@ class Config:
     boot_wall_right: float = 0.98
     catch_min_vy: float = 0.8      # px/tick downward to treat the boot as descending
     boot_lost_secs: float = 1.4    # boot unseen this long => catch phase ends
-    catch_timeout: float = 90.0    # hard cap on a single catch phase
+    catch_timeout: float = 600.0   # safety cap only. 90s truncated HEALTHY rallies
+                                   # mid-air (the phase has reliable end signals:
+                                   # sat fade, boot-gone 1.4s, top-exit breakthrough)
+    # Breakthrough = level complete: the boot punches through the bricks and
+    # exits the TOP of the field (the game fades 1.3-1.4s later). Recognize it
+    # instead of booking it as "boot lost".
+    exit_top_y: float = 60.0       # last det above this y (px) ...
+    exit_top_vy: float = -150.0    # ... while ascending faster than this ...
+    exit_top_lost: int = 6         # ... unseen this many fresh frames => exited
 
     # --- Scene-state sync (mean saturation of the field centre) ---
     # Playing ~= 228, loading/paused ~= 4, so any split in between is safe.

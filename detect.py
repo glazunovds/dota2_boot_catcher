@@ -151,7 +151,7 @@ def to_gray(bgr):
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
 
-def find_boot(panel_bgr, prev_gray, cfg, roi=None):
+def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None):
     """Locate the in-flight boot. Returns ((x, y, area) or None, gray).
 
     The boot is found as *moving* pixels that are boot-orange (its body). Two
@@ -166,9 +166,19 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None):
     If `roi=(x0, y0, x1, y1)` (panel px) is given, ONLY that box is searched.
     Like the reference Rust bot, restricting the search to a box around the
     boot's predicted path is what keeps stray orange motion (UI, aim dots, the
-    jester) from being picked up as a false, far-away "boot".
+    jester) from being picked up as a false, far-away "boot". The side margins
+    stay ON even inside a ROI: replay showed that without them a ROI drifting
+    to a field edge locks onto the animated claw/jester there and never lets
+    go (rally 3/7 tails). They do slice a pole-hugging boot to a sliver
+    (~0.3% of frames) - the relaxed aspect cap plus the 12-fresh-frame lock
+    budget ride that out instead.
+
+    `gray` may pass a precomputed grayscale of panel_bgr; `min_area` raises the
+    minimum blob size (used for full-field re-acquisition, where tiny UI trim /
+    falling pickups would otherwise be grabbed while the gate is off).
     """
-    gray = to_gray(panel_bgr)
+    if gray is None:
+        gray = to_gray(panel_bgr)
     if prev_gray is None or prev_gray.shape != gray.shape:
         return None, gray
     h, w = gray.shape
@@ -193,10 +203,11 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None):
         boot = keep
     boot = cv2.morphologyEx(boot, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, _, stats, cent = cv2.connectedComponentsWithStats(boot, 8)
+    area_lo = max(cfg.boot_min_area, min_area or 0)
     passing = []
     for i in range(1, n):
         _x, _y, bw, bh, area = stats[i]
-        if area < cfg.boot_min_area or area > cfg.boot_max_area:
+        if area < area_lo or area > cfg.boot_max_area:
             continue                          # too small = noise, too big = brick cluster
         asp = max(bw, bh) / max(1, min(bw, bh))
         if asp > cfg.boot_max_aspect or bw > cfg.boot_max_w:
