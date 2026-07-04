@@ -139,6 +139,15 @@ class Config:
     brk_column_descent: float = 250.0 # ... descending this far = shine wave, not boot
     brk_column_edge: float = 80.0     # column rule only for interior x (pole-hugging
                                       # boot descents are real and near-vertical)
+    # Coin-ride breaker: coin falls produce dets of MIXED size (122-440px, the
+    # 250-440 clusters defeat any per-det floor) but their rolling MEDIAN stays
+    # ~200 while real boot flight sits ~550 - and they DESCEND steadily, which
+    # separates them from wall-pocket sliver hovering (validated on 3 runs:
+    # catches every known fatal ride, fires in winning rallies mostly on real
+    # transient rides that got lucky).
+    brk_coin_dets: int = 5            # rolling window (consecutive accepted dets)
+    brk_coin_med: float = 300.0       # median area below this ...
+    brk_coin_descent: float = 60.0    # ... while net descent exceeds this = coins
     blacklist_r: float = 45.0         # after a break/lock-drop, ignore detections
     blacklist_secs: float = 1.5       # this close to the dead spot for this long
 

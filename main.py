@@ -862,7 +862,7 @@ def catch_phase(region, cfg):
                 # Impossible-track breakers: some gold blocks have an ANIMATED
                 # shine, so they pass motion+color and can steal the lock while
                 # the boot flies on. Two motions a real boot never makes:
-                det_hist.append((now, float(dx), float(dy)))
+                det_hist.append((now, float(dx), float(dy), int(det[2])))
                 if len(det_hist) > 16:
                     det_hist.pop(0)
                 broke = None
@@ -882,6 +882,12 @@ def catch_phase(region, cfg):
                             and ys[-1] - ys[0] > cfg.brk_column_descent
                             and cfg.brk_column_edge <= dx <= w - cfg.brk_column_edge):
                         broke = "column walk (shine wave)"
+                if broke is None and len(det_hist) >= cfg.brk_coin_dets:
+                    dw = det_hist[-cfg.brk_coin_dets:]
+                    med = sorted(p[3] for p in dw)[len(dw) // 2]
+                    if (med < cfg.brk_coin_med
+                            and dw[-1][2] - dw[0][2] > cfg.brk_coin_descent):
+                        broke = "coin ride (small median, descending)"
                 if broke:
                     log(f"  catch: broke {broke} at ({dx},{int(dy)}) - blacklisted, re-acquiring")
                     blacklist.append((float(dx), float(dy), now + cfg.blacklist_secs))
