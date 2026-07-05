@@ -7,24 +7,27 @@ global keyboard input. Multi-monitor aware (auto-scans monitors for the game).
 
 Usage
 -----
-  python main.py                 interactive: press 's' to start, hold 'q' to stop
+  python main.py --manual        RECOMMENDED: you press PLAY + focus the game,
+                                 the bot only sends Space/A/D. Press 's' to
+                                 start, hold 'q' to stop.
+  python main.py                 legacy auto mode (also clicks PLAY)
   python main.py --grab           save one screenshot per monitor (debug), then exit
   python main.py --dry-run        print detections + save debug frames, no keys
   python main.py --calibrate      pin the field by pointing at the gold frame
   python main.py --monitor N      force capture of monitor N (1 = first)
   python main.py --snapshot NAME  save one field screenshot to snapshots/
-  python main.py --debug          save annotated frames while playing
 
 How to play
 -----------
-1. Open the Boot Breaker minigame (the intro PLAY screen or a level is fine).
-2. Run `python main.py`, then press 's'. It auto-clicks PLAY and plays on.
-   Hold 'q' to stop, Ctrl+C to quit.
+1. In Dota: console -> `fps_max_ui 60`. Open Boot Breaker, press PLAY yourself,
+   click once inside the game field, keep Dota in the foreground.
+2. In an ADMINISTRATOR terminal: `python main.py --manual`, then press 's'.
+   Hold 'q' to stop after the current boot, Ctrl+C to quit.
 
-Keyboard input goes to whatever window is focused; the auto-PLAY click focuses
-Dota for you. Detection is colour-based - verify with `--dry-run` first and tune
-config.json if needed (see README). The `keyboard` library usually needs the
-terminal run as Administrator to reach Dota.
+Keys are POSTed straight to the Dota window (no clicks, no focus stealing) but
+Dota only processes them while it is the FOREGROUND window. The `keyboard`
+library needs the terminal run as Administrator for the global hotkeys. See
+README.md for details.
 """
 
 import argparse
@@ -484,7 +487,7 @@ def snap(region, cfg, label, cart_x=None, target_x=None, boot=None):
         cart_x = detect.find_cart_x(panel, cfg)
     if _dbg_dir:
         img = detect.annotate(panel, cfg, cart_x, target_x, int(sat), label, boot)
-        cv2.imwrite(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_{label}.png"), img)
+        cv2.imwrite(os.path.join(_dbg_dir, f"f{_dbg_n:05d}_{label}.png"), img)
         _dbg_n += 1
     return sat, cart_x
 
@@ -995,12 +998,12 @@ def catch_phase(region, cfg):
             release_held()
 
         if _dbg_dir and n % 4 == 0:                   # save clean + annotated
-            save_frame_async(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch_raw.png"), panel)
+            save_frame_async(os.path.join(_dbg_dir, f"f{_dbg_n:05d}_catch_raw.png"), panel)
             boot_draw = (int(bx), int(by)) if bx is not None else None
             ann = detect.annotate(panel, cfg, int(cx) if cx is not None else cart,
                                   int(target_x) if target_x is not None else None,
                                   int(sat), "catch", boot_draw)
-            save_frame_async(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch.png"), ann)
+            save_frame_async(os.path.join(_dbg_dir, f"f{_dbg_n:05d}_catch.png"), ann)
             _dbg_n += 1
         n += 1
         _tel.append((round(now - start, 3),
@@ -1099,9 +1102,8 @@ def main_loop(cfg, verbose):
             if _use_post:
                 # Keys go via PostMessage straight to the window - no focus/click
                 # needed. If this works the cart moves with NO clicking at all.
-                log("  input: PostMessage (focus-free). NO click needed - if the")
-                log("  cart moves, we're done. If it doesn't move AT ALL, tell me")
-                log("  and I'll switch to the click-to-focus method.")
+                log("  input: PostMessage (no clicks, no focus stealing). If the cart")
+                log("  never moves, make sure Dota is the FOREGROUND window.")
             else:
                 # keyboard-lib mode needs real focus: click the GAME panel (which
                 # only exists now that a level is loaded; the intro was a different
@@ -1163,8 +1165,13 @@ def run_interactive(cfg, verbose):
     t = threading.Thread(target=listen_for_stop, daemon=True)
     t.start()
     keyboard.add_hotkey('s', lambda: start_game(cfg, verbose))
-    print("Ready. Open Boot Breaker (intro or a level), then press 's'.\n"
-          "It will click PLAY if needed and play on. Hold 'q' to stop, Ctrl+C to quit.")
+    if _manual:
+        print("Ready (manual mode). In Dota: open Boot Breaker, press PLAY yourself,\n"
+              "click once inside the game field, keep Dota in front - then press 's'.\n"
+              "Hold 'q' to stop after the current boot, Ctrl+C to quit.")
+    else:
+        print("Ready. Open Boot Breaker (intro or a level), then press 's'.\n"
+              "It will click PLAY if needed and play on. Hold 'q' to stop, Ctrl+C to quit.")
     try:
         keyboard.wait('ctrl+c')
     except KeyboardInterrupt:

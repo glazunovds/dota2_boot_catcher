@@ -6,3 +6,4 @@ config.json
 *.log
 .venv/
 venv/
+runs/

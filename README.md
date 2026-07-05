@@ -1,116 +1,83 @@
-# dota2_boot_catcher
+# 🥾 Dota 2 Boot Breaker Bot
 
-Auto-player for the Dota 2 Dark Carnival **Boot Breaker** minigame (position the
-cart, lock, aim, throw the boot up to break bricks — repeat each level). Same
-approach as the minesweeper bot: full-screen capture + OpenCV detection +
-global keyboard input.
+> A computer-vision **auto-player for the Boot Breaker arcade minigame** from Dota 2's **Dark Carnival** event. It watches the screen, identifies the flying boot by its cyan spin arc, and drives the cart with synthetic key presses — clearing level after level unattended.
+>
+> **Best recorded run: 84,355 points, 60+ levels cleared in a single hour-long session.**
 
-## Requirements
+No game files are read or modified, no memory access, no injection. The bot only *looks at pixels* (screen capture) and *presses keys* (Space / A / D posted to the Dota window). It is an external autoplayer in the purest sense.
 
-- Windows, Dota 2 (1920x1080 works best, like the minesweeper bot).
-- Python 3.10+.
-- `pip install -r requirements.txt` (opencv-python, numpy, pyautogui, keyboard, pillow).
-
-> The `keyboard` library may need the terminal to be run **as Administrator**
-> for its global hotkeys/input to reach Dota.
+| Lock & aim | Boot in flight |
+|:---:|:---:|
+| ![lock](screenshots/lock_cart_position.png) | ![flight](screenshots/boot_flying.png) |
 
 ## How it works
 
-- Captures the screen with **mss** and **auto-scans every monitor** for the
-  minigame, so it works with Dota on a second screen / borderless window (the
-  common cause of "nothing happens"). Locates the play field by the modal's
-  **gold frame**; falls back to a pinned region from `--calibrate`.
-- Finds the **cart** (red) and **bricks** (gold) by colour, and tracks the
-  level/loading state by the field's **colour saturation** (bright while a level
-  is up, near-zero during the between-level loading).
-- Per boot: move the cart under the centre of the bricks → Space (lock) →
-  Space (throw) → **catch phase**: follow the bouncing boot with the cart so it
-  doesn't fall off (miss = lose a boot), until it leaves play or the level ends.
-- The boot is found by **motion + colour** (moving orange body / cyan spin arc).
-  Requiring motion is deliberate: it ignores the static light-blue platforms in
-  level 2+ and the static gold bricks.
-- Play control is keyboard-only (A/D/Space); the only mouse use is clicking the
-  **PLAY** button (auto-PLAY) to start a run, which also focuses Dota.
+- **Capture** — [`mss`](https://github.com/BoboTiG/python-mss) grabs the minigame panel ~46–60×/s. The panel is auto-located on **any monitor** by its ornate gold frame (candidates are scored by saturation × area, so a second monitor can't shadow the real game).
+- **Boot identity** — candidate blobs are moving orange pixels, but the game rains gold look-alikes (falling coins, "+50" score popups, impact sparkles, shimmering blocks, brick debris). The real boot is the only object with a bright **cyan spin arc**, so every candidate must carry one. This single test is what makes tracking junk-proof (validated on 531 hand-labeled blobs: 34/34 junk rejected, ~100% of boot detections kept).
+- **Tracker** — predictive search ROI → distance gate → velocity measured between accepted detections → brief coast, then full-field re-acquisition. "Impossible motion" breakers drop any lock that stops dead mid-air (a real boot never does).
+- **Steering** — bang-bang A/D with hysteresis and a small momentum lookahead, tuned against 573 recorded cart-line crossings.
+- **Game state** — level flow is followed via the field's color saturation (loading dip → fade-in), and a boot exiting through the top of a broken wall is recognized as **level complete**.
+- **Input** — keys go straight to the Dota window via `PostMessage`: the bot never clicks and never steals focus. Dota just has to be the foreground window.
 
-## Use
+## Requirements
 
-1. Open Boot Breaker (the intro **PLAY** screen or a level - either is fine).
-2. In a terminal **run as Administrator** (the `keyboard` library needs it to
-   send keys to Dota): `python main.py`
-3. Press **`s`** to start. It auto-clicks PLAY if needed and plays on. Hold
-   **`q`** to stop, **Ctrl+C** to quit.
+- **Windows 10/11** (Win32 APIs for input)
+- **Python 3.10+** — install from the [Microsoft Store](https://apps.microsoft.com/detail/9NCVDN91XZQP) or [python.org](https://www.python.org/downloads/windows/)
+- `pip install -r requirements.txt` — opencv-python, numpy, mss, keyboard
+- **Dota's UI frame rate capped at 60**: open the Dota 2 console and run `fps_max_ui 60`. The minigame's physics speed is tied to its render rate; the bot is tuned and tested at 60 fps.
+- Terminal **run as Administrator** — the `keyboard` library needs it so the global `s`/`q` hotkeys work while Dota has focus.
 
-> **Multi-monitor / borderless:** capture and clicks use absolute coordinates
-> across all monitors, so this works out of the box. If auto-scan picks the
-> wrong screen, force it with `--monitor N` (run `--grab` first to see the
-> monitor list and which one the field was found on).
+## Tested on
 
-### Verify detection first (recommended)
+- **3440×1440 ultrawide**, Dota in borderless fullscreen, `fps_max_ui 60`
+- Multi-monitor setups (game on either monitor — auto-detected)
 
-Because detection is colour-based and every setup differs, check it before
-trusting it — no keys are pressed:
+**Other resolutions:** the field is auto-detected from the modal's gold frame, and every detection constant is a fraction of the field size, so common resolutions ≥1080p should work — but only 3440×1440 has actually been tested. If detection misbehaves: `--grab` shows what each monitor capture looks like, `--dry-run` watches detections without pressing any keys, `--calibrate` pins the field manually.
 
-```powershell
-python main.py --dry-run --debug-dir debug
-```
+## Quick start
 
-Watch the printed `sat=`, `cart=`, `target=` values and the annotated frames in
-`debug/`:
+1. In Dota: console → `fps_max_ui 60`. Open Dark Carnival → **Boot Breaker** and press **PLAY** yourself.
+2. Click once inside the game field and keep Dota in the foreground.
+3. In an **Administrator** terminal:
 
-- the **red** line should sit on the cart, the **green** line on the middle of
-  the bricks;
-- `sat` (mean colour saturation) should be **high (~200+) → `READY`** while a
-  level is on screen and **drop near 0 → `loading`** during the between-level
-  loading screen. That saturation swing is how the bot knows one level ended and
-  the next began (so it throws exactly once per level).
+   ```
+   pip install -r requirements.txt
+   python main.py --manual
+   ```
 
-If they're off, tune `config.json` (created on first run / `--calibrate`).
+4. Press **`s`** — the bot locks, throws and catches on its own, level after level. Hold **`q`** to stop after the current boot; `Ctrl+C` quits.
 
-## Modes
+**Tips**
 
-- `python main.py` — interactive play (`s`/`q`/Ctrl+C).
-- `python main.py --grab` — save one screenshot per monitor to `snapshots/` and
-  print which monitor the field was found on. Run this first if it can't find
-  the game.
-- `python main.py --dry-run [--debug-dir DIR]` — detect only, no keys.
-- `python main.py --monitor N` — force capture of monitor N (from `--grab`).
-- `python main.py --debug` — play and also save annotated frames to `debug/`.
-- `python main.py --snapshot NAME` — save one field screenshot to `snapshots/`.
-- `python main.py --calibrate` — point at the two gold-frame corners (hold still
-  3s each) to pin the field, if auto-detect misbehaves.
-- `python main.py --no-auto-play` — don't auto-click PLAY (start it yourself).
-- `-v` / `--verbose` — print what each level decides.
+- Disable **Steam overlay notifications** for Dota — a "friend is online" popup can silently eat the bot's key presses (the bot rings the terminal bell and tells you when that happens).
+- Don't click other windows mid-run: posted keys only reach Dota while it is the foreground window.
+- Debug frames + per-tick telemetry are written to `debug/` (cleared on each start) — invaluable if you want to see exactly what the bot saw.
 
-## Tuning (`config.json`)
+## Flags
 
-Defaults were measured from real 1920x1080 screenshots, so they should be close.
-Most likely to need adjusting if your setup differs:
+| Flag | Meaning |
+|---|---|
+| `--manual` | **Recommended.** No clicks, no focus grabbing — you press PLAY and focus the game; the bot only sends Space/A/D. |
+| *(none)* | Legacy auto mode: also clicks the PLAY button and brings Dota to the front. |
+| `--monitor N` | Force capture of monitor N (1 = first). Default: auto-scan all monitors. |
+| `--calibrate` | Pin the field region manually (point the mouse at the gold frame corners). |
+| `--dry-run` | Detect and save debug frames, press no keys (`--dry-seconds S` sets duration). |
+| `--grab` | Save one screenshot per monitor and exit — capture troubleshooting. |
+| `--snapshot NAME` | Save one field screenshot and exit. |
+| `--no-auto-play` | Auto mode without the PLAY click. |
+| `--no-debug` | Don't save debug frames (saves disk). |
+| `--debug-dir DIR` | Where debug frames go (default `debug/`). |
+| `-v` | Verbose logging. |
 
-- `sat_ready` / `sat_ended` — the "level is up" vs "loading" saturation split
-  (playing ≈ 230, loading ≈ 0-5, so there's a lot of room). Read live `sat` in
-  `--dry-run`.
-- `gold_*` / `red_*` HSV ranges — brick and cart colour.
-- `field_x0`/`field_x1`/`field_y0`/`field_y1` — where the play field sits inside
-  the gold-framed modal (fractions of the modal). Change only if the field crop
-  in `--dry-run` is off.
-- `brick_top`/`brick_bottom`, `cart_top`/`cart_bottom`, `side_margin` — detection
-  bands as fractions of the play field.
-- `deadzone_px`, `move_pulse`, `move_timeout` — cart positioning.
-- `aim_taps` — D-taps (negative = A) to rotate the launch angle before the
-  throw. `0` = launch at the default angle (≈straight up, verified from the
-  in-game aim preview).
-- `ready_timeout`, `level_end_timeout`, `settle_delay`, `post_lock_delay` — sync
-  timing.
-- `region` — `[left, top, w, h]` to force a fixed field and skip auto-detect.
-- `unpause_f9` — if the field can't be found at startup, tap F9 once (in case
-  the game is paused) and retry.
+## Known limits
 
-> Geometry and thresholds are validated against real frames, but timings
-> (`settle_delay`, `move_*`, `post_lock_delay`) were not tested against a live
-> game — run `--dry-run` first and nudge if needed.
+- On late levels the boot's base speed grows and each bounce accelerates it further; a boot squeezed through a one-block gap at a wall can rebound faster than the cart can physically react. A handful of lost boots per long session is normal (lives regenerate as levels are cleared).
+- Frames the game never rendered (loading hitches) are invisible to any screen-capture bot.
 
-## Files
+## Status
 
-- `main.py` — capture, control loop, hotkeys, utility modes.
-- `detect.py` — panel/cart/brick/prompt detection (OpenCV).
-- `config.py` — settings dataclass (persisted to `config.json`).
+Delivered **as-is**: built and battle-tested for one event minigame on one machine, and not planned to be maintained. If Valve changes the minigame art — especially the boot sprite or its cyan spin arc — detection will need re-tuning.
+
+---
+
+*Keywords: dota 2, dota2, boot breaker, dark carnival, minigame, bot, autoplayer, auto-player, arkanoid, breakout, brick breaker, computer vision, opencv, python, screen capture, mss, object tracking, game automation, pixel bot, no injection*
