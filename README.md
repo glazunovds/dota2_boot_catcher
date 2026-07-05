@@ -6,6 +6,11 @@
 
 No game files are read or modified, no memory access, no injection. The bot only *looks at pixels* (screen capture) and *presses keys* (Space / A / D posted to the Dota window). It is an external autoplayer in the purest sense.
 
+<p align="center">
+  <img src="screenshots/highscore_84355.png" alt="84,355 points - new high score, 3x the previous leaderboard record" width="560">
+  <br><em>One unattended session: 84,355 points — over 3× the previous leaderboard record.</em>
+</p>
+
 | Lock & aim | Boot in flight |
 |:---:|:---:|
 | ![lock](screenshots/lock_cart_position.png) | ![flight](screenshots/boot_flying.png) |
