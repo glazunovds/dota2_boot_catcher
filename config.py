@@ -123,7 +123,10 @@ class Config:
     # is what stops stray orange motion being grabbed as a false, far boot.
     boot_roi_pad: float = 55.0        # base ROI radius (px) around the prediction
     boot_roi_speed: float = 0.05      # + this * boot speed(px/s): faster = bigger box
-    boot_roi_lost_grow: float = 22.0  # + this * lost-frames: widen while searching
+    boot_roi_lost_grow: float = 50.0  # + this * lost-frames: widen while searching
+                                      # (22 was too slow for a 60fps boot at
+                                      # ~2500px/s - the ROI trailed it by up to
+                                      # 875px during launch/bounce reversals)
     boot_gate_base: float = 170.0     # reject a det this many px from the prediction
     boot_gate_lost: float = 55.0      # + this * lost-frames (looser while unsure)
     boot_lost_keep: int = 12          # keep the lock this many lost frames, then re-acquire
@@ -184,16 +187,21 @@ class Config:
     catch_lead: float = 2.0        # frames of boot velocity to aim ahead of it
     catch_smooth: float = 0.45     # low-pass on the target (lower = tracks tighter)
     catch_cart_smooth: float = 0.5 # low-pass on the (noisy) cart reading
-    catch_cart_lookahead: float = 0.03  # damp overshoot by steering to where the
+    # Steering constants retuned for 60fps play (46Hz loop, per-tick cart travel
+    # ~13-26px vs the 27-55px they were originally sized for). Simulation over
+    # 573 recorded final descents: this set halves marginal landings (crossings
+    # ending >55px from the boot: 90 -> 32) with negligible added chatter.
+    catch_cart_lookahead: float = 0.01  # damp overshoot by steering to where the
                                         # cart will be after this much of its own
                                         # momentum. MUST stay small: reversal needs
-                                        # cart_vel > deadzone*1.5/lookahead; at 0.03
-                                        # that's >1900px/s (above cart max ~1120) so
-                                        # it can only RELEASE early, never reverse
-                                        # the wrong way. 0.10 reversed the cart off a
-                                        # diagonally-descending boot and lost it.
-    catch_deadzone_frac: float = 0.045  # start moving only past this (>per-tick travel)
-    catch_coast_frac: float = 0.025     # cart coasts ~this frac after release; brake early by it
+                                        # cart_vel > deadzone*1.5/lookahead, far
+                                        # above cart max, so it can only RELEASE
+                                        # early, never reverse the wrong way. 0.03
+                                        # over-led the boot at 60fps (biggest
+                                        # single gap contributor); 0.0 worsens the
+                                        # p95 tail. 0.01 is the sweet spot.
+    catch_deadzone_frac: float = 0.032  # start moving only past this (>per-tick travel)
+    catch_coast_frac: float = 0.020     # cart coasts ~this frac after release; brake early by it
     catch_period: float = 0.005    # control tick (fast; the grab already paces it)
     catch_line: float = 0.82       # boot is "caught" when it reaches this y-frac (cart top)
     catch_predict_top: float = 0.45  # only track once the boot is below this (stable)

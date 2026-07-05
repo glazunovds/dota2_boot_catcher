@@ -834,9 +834,17 @@ def catch_phase(region, cfg):
                 dt = now - last_t
                 pred_x = bx + bvx * dt
                 pred_y = by + bvy * dt
-                speed = (bvx * bvx + bvy * bvy) ** 0.5
-                radius = cfg.boot_roi_pad + speed * cfg.boot_roi_speed + lost * cfg.boot_roi_lost_grow
-                roi = (pred_x - radius, pred_y - radius, pred_x + radius, pred_y + radius)
+                # Once coasting has FROZEN (lost > boot_freeze_lost) the ROI is
+                # pinned wherever the boot vanished - after a launch/bounce/
+                # reversal the real boot is hundreds of px away while still
+                # perfectly detectable (arc + full size). Go straight to a
+                # full-field search instead of inflating the box for another
+                # 8 frames; the arc identity gate makes the wide search safe.
+                # (6 of the 8 recorded 0.6-0.84s blind gaps were exactly this.)
+                if lost <= cfg.boot_freeze_lost:
+                    speed = (bvx * bvx + bvy * bvy) ** 0.5
+                    radius = cfg.boot_roi_pad + speed * cfg.boot_roi_speed + lost * cfg.boot_roi_lost_grow
+                    roi = (pred_x - radius, pred_y - radius, pred_x + radius, pred_y + radius)
             blacklist = [b for b in blacklist if now < b[2]]
             # Size floor with hysteresis. Every lock THIEF on record is small
             # (coins 104-238px, debris 81-199, trim 15-63) while the flying boot
