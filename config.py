@@ -7,9 +7,19 @@ not the whole modal.
 
 import json
 import os
+import sys
 from dataclasses import dataclass, asdict, field
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+def app_dir():
+    """Directory config/logs/debug live in: next to the .exe when frozen
+    (PyInstaller unpacks __file__ into a temp dir), else next to the source."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_PATH = os.path.join(app_dir(), "config.json")
 
 
 @dataclass

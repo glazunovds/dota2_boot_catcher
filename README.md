@@ -41,6 +41,8 @@ No game files are read or modified, no memory access, no injection. The bot only
 
 ## Quick start
 
+**No Python?** Grab `BootBreakerBot.exe` from [Releases](https://github.com/glazunovds/dota2_boot_catcher/releases) — same flags, no install. Run it from an **Administrator** terminal (`BootBreakerBot.exe --manual`). Windows SmartScreen will warn because the exe is unsigned — "More info → Run anyway". `config.json`, `debug/` and logs are created next to the exe.
+
 1. In Dota: console → `fps_max_ui 60`. Open Dark Carnival → **Boot Breaker** and press **PLAY** yourself.
 2. Click once inside the game field and keep Dota in the foreground.
 3. In an **Administrator** terminal:

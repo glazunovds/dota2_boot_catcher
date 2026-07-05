@@ -7,3 +7,7 @@ config.json
 .venv/
 venv/
 runs/
+build/
+dist/
+*.spec
+boot.ico

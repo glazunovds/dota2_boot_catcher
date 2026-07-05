@@ -44,7 +44,7 @@ import mss
 import keyboard
 
 import detect
-from config import Config, load_config, save_config
+from config import Config, load_config, save_config, app_dir
 
 running = False       # True while a game is being played
 stop_flag = True      # keeps the 'q' listener thread alive
@@ -1227,7 +1227,7 @@ def do_snapshot(cfg, name):
         print("Could not locate the field - try --grab instead.")
         return
     img = grab_region(region)
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    out_dir = os.path.join(app_dir(), "snapshots")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"{name}.png")
     cv2.imwrite(out, img)
@@ -1236,7 +1236,7 @@ def do_snapshot(cfg, name):
 
 def do_grab(cfg):
     """Save one PNG per monitor so you can see exactly what the bot captures."""
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    out_dir = os.path.join(app_dir(), "snapshots")
     os.makedirs(out_dir, exist_ok=True)
     mons = monitors()
     print(f"{len(mons) - 1} monitor(s) detected.")
@@ -1331,7 +1331,7 @@ def main():
         return
 
     # Interactive play: always write a log; save debug frames unless disabled.
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = app_dir()
     _log_f = open(os.path.join(here, "boot_breaker.log"), "w", encoding="utf-8")
     if not args.no_debug:
         _dbg_dir = os.path.join(here, args.debug_dir)
