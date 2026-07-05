@@ -1064,9 +1064,16 @@ def main_loop(cfg, verbose):
     if _manual:
         # Manual mode: no clicks, no foreground grabbing - the user alt-tabs to
         # Dota and clicks the minigame themselves; the bot only sends Space/A/D.
-        log("  MANUAL mode: focus the minigame yourself (alt-tab to Dota, click")
-        log("  inside the game field once) and keep Dota in front. The bot will")
-        log("  only press Space / A / D - it will never click or steal focus.")
+        log("  MANUAL mode: the bot only presses Space / A / D. It NEVER clicks -")
+        log("  the one click below must come from YOU.")
+        log("  " + "=" * 60)
+        log("  >>>  DO THIS NOW, WITH YOUR MOUSE:                        <<<")
+        log("  >>>  1. Press PLAY in the game if you haven't already.    <<<")
+        log("  >>>  2. CLICK ONCE INSIDE THE GAME FIELD (the dark play   <<<")
+        log("  >>>     area) - a real human click. The minigame ignores  <<<")
+        log("  >>>     the bot's keys until a real click focuses it.     <<<")
+        log("  >>>  3. Keep Dota in the FOREGROUND for the whole run.    <<<")
+        log("  " + "=" * 60)
     else:
         bring_foreground()
         # Keys go via PostMessage (no keyboard focus needed), BUT Dota only
@@ -1102,8 +1109,9 @@ def main_loop(cfg, verbose):
             if _use_post:
                 # Keys go via PostMessage straight to the window - no focus/click
                 # needed. If this works the cart moves with NO clicking at all.
-                log("  input: PostMessage (no clicks, no focus stealing). If the cart")
-                log("  never moves, make sure Dota is the FOREGROUND window.")
+                log("  input: PostMessage (no clicks, no focus stealing).")
+                log("  If the cart never moves: CLICK inside the game field yourself")
+                log("  and make sure Dota is the FOREGROUND window.")
             else:
                 # keyboard-lib mode needs real focus: click the GAME panel (which
                 # only exists now that a level is loaded; the intro was a different
