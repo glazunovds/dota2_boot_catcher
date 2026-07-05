@@ -48,6 +48,7 @@ stop_flag = True      # keeps the 'q' listener thread alive
 _held = None          # currently held movement key ('a'/'d') or None
 _dbg_dir = None       # set to a folder path to dump annotated frames
 _manual = False       # --manual: never click / grab foreground; user owns focus
+_catch_seen = False   # did the last catch phase ever see the boot? (keys-dead watchdog)
 _dbg_n = 0
 _sct = None           # lazily-opened mss capture handle
 _log_f = None         # optional log file handle
@@ -971,6 +972,8 @@ def catch_phase(region, cfg):
             break
         time.sleep(cfg.catch_period)
     release_held()
+    global _catch_seen
+    _catch_seen = ever_seen
     if _dbg_dir and _tel:                       # dump this rally's telemetry
         p = os.path.join(_dbg_dir, "catch_tel.csv")
         header = not os.path.exists(p)
@@ -1024,6 +1027,10 @@ def main_loop(cfg, verbose):
 
     shot = 0
     focus_prompted = False
+    blind_cycles = 0     # consecutive throw->catch cycles that never saw a boot:
+                         # the dropped-keys signature (Dota lost input focus, e.g.
+                         # a Steam overlay popup) - Space silently does nothing,
+                         # the game sits on a static serve screen forever
     while running:
         if not wait_ready(region, cfg):
             if running:
@@ -1055,6 +1062,18 @@ def main_loop(cfg, verbose):
         shot += 1
         log(f"[boot {shot}] lock -> throw -> catch")
         play_level(region, cfg, verbose)
+        # Keys-dead watchdog. Two blind cycles happen normally after a level
+        # transition (serve animation eats the presses); three+ in a row means
+        # the keys aren't reaching Dota at all.
+        blind_cycles = 0 if _catch_seen else blind_cycles + 1
+        if blind_cycles >= 3:
+            print("\a", end="", flush=True)          # terminal bell
+            log("  !!! KEYS ARE NOT REACHING DOTA (3+ throws with no boot seen).")
+            log("  !!! Likely a Steam overlay popup or lost focus - click inside")
+            log("  !!! the game to restore it. (Tip: disable Steam overlay")
+            log("  !!! notifications for Dota to prevent this.)")
+            if not _manual:
+                bring_foreground()
     release_held()
     log("Loop stopped.")
 
