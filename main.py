@@ -444,6 +444,36 @@ def tap(key, hold=0.10):
 # Debug frame dump
 # --------------------------------------------------------------------------- #
 
+# Debug frames are written by a background thread so PNG encoding (~15-40ms
+# per frame) never blocks the catch loop - at 60fps play the loop needs every
+# millisecond. Under pressure frames are DROPPED, not queued without bound.
+_write_q = None
+
+
+def _writer_loop():
+    while True:
+        item = _write_q.get()
+        if item is None:
+            return
+        path, img = item
+        try:
+            cv2.imwrite(path, img)
+        except Exception:
+            pass
+
+
+def save_frame_async(path, img):
+    global _write_q
+    if _write_q is None:
+        import queue
+        _write_q = queue.Queue(maxsize=64)
+        threading.Thread(target=_writer_loop, daemon=True).start()
+    try:
+        _write_q.put_nowait((path, img))
+    except Exception:
+        pass                                   # queue full: drop this frame
+
+
 def snap(region, cfg, label, cart_x=None, target_x=None, boot=None):
     """Grab the field and (if --debug) save an annotated frame. Returns
     (sat, cart_x) so callers can log the scene state cheaply."""
@@ -945,12 +975,12 @@ def catch_phase(region, cfg):
             release_held()
 
         if _dbg_dir and n % 4 == 0:                   # save clean + annotated
-            cv2.imwrite(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch_raw.png"), panel)
+            save_frame_async(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch_raw.png"), panel)
             boot_draw = (int(bx), int(by)) if bx is not None else None
             ann = detect.annotate(panel, cfg, int(cx) if cx is not None else cart,
                                   int(target_x) if target_x is not None else None,
                                   int(sat), "catch", boot_draw)
-            cv2.imwrite(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch.png"), ann)
+            save_frame_async(os.path.join(_dbg_dir, f"f{_dbg_n:04d}_catch.png"), ann)
             _dbg_n += 1
         n += 1
         _tel.append((round(now - start, 3),

@@ -189,31 +189,59 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
     if prev_gray is None or prev_gray.shape != gray.shape:
         return None, gray
     h, w = gray.shape
-    motion = cv2.absdiff(gray, prev_gray) >= cfg.boot_motion_thresh
+    # Process ONLY the ROI crop when one is given (~20x fewer pixels than the
+    # full field) - this is what lets the live loop run at 45-60Hz to match a
+    # 60fps game. All limits/masks below are computed in ABSOLUTE field coords
+    # and translated into the crop.
+    if roi is not None:
+        # Process a PADDED crop so border effects match full-frame processing:
+        # the motion dilation and (crucially) the cyan-arc count need context
+        # from just outside the ROI - a boot at the ROI edge keeps its arc.
+        # Candidate blobs themselves are still restricted to the exact ROI.
+        P = 24
+        kx0 = max(0, int(roi[0])); ky0 = max(0, int(roi[1]))
+        kx1 = min(w, int(roi[2])); ky1 = min(h, int(roi[3]))
+        if kx1 <= kx0 or ky1 <= ky0:
+            return None, gray
+        rx0 = max(0, kx0 - P); ry0 = max(0, ky0 - P)
+        rx1 = min(w, kx1 + P); ry1 = min(h, ky1 + P)
+    else:
+        rx0 = ry0 = 0
+        rx1, ry1 = w, h
+    sub = panel_bgr[ry0:ry1, rx0:rx1]
+    motion = cv2.absdiff(gray[ry0:ry1, rx0:rx1],
+                         prev_gray[ry0:ry1, rx0:rx1]) >= cfg.boot_motion_thresh
     motion = cv2.dilate(motion.astype(np.uint8), np.ones((5, 5), np.uint8))
-    hsv = _hsv(panel_bgr)
+    hsv = _hsv(sub)
     hh, ss, vv = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
     orange = ((hh >= cfg.boot_h_lo) & (hh <= cfg.boot_h_hi) &
               (ss >= cfg.boot_s_min) & (vv >= cfg.boot_v_min))
     boot = ((motion > 0) & orange).astype(np.uint8) * 255
+
+    def zero_rows(abs_y):                             # blank crop rows below abs_y
+        cy = max(0, abs_y - ry0)
+        if cy < boot.shape[0]:
+            boot[cy:] = 0
+
     cut = int(h * cfg.boot_search_bottom)
     if cart_x is None:
-        boot[cut:] = 0                                # ignore the whole cart band
+        zero_rows(cut)                                # ignore the whole cart band
     else:                                             # deep search, cart masked
-        boot[int(h * cfg.boot_search_bottom_ext):] = 0
-        cx0 = max(0, int(cart_x - cfg.cart_mask_halfw))
-        cx1 = min(w, int(cart_x + cfg.cart_mask_halfw))
-        boot[cut:, cx0:cx1] = 0
+        zero_rows(int(h * cfg.boot_search_bottom_ext))
+        cy = max(0, cut - ry0)
+        cx0 = max(0, int(cart_x - cfg.cart_mask_halfw) - rx0)
+        cx1 = min(boot.shape[1], int(cart_x + cfg.cart_mask_halfw) - rx0)
+        if cy < boot.shape[0] and cx1 > cx0:
+            boot[cy:, cx0:cx1] = 0
     m = int(w * cfg.boot_side_margin)                 # ignore the animated
-    boot[:, :m] = 0                                    # claw/jester/pole at the
-    boot[:, w - m:] = 0                                # field edges
-    if roi is not None:                               # restrict to the ROI box
-        x0, y0, x1, y1 = roi
-        x0 = max(0, int(x0)); y0 = max(0, int(y0))
-        x1 = min(w, int(x1)); y1 = min(h, int(y1))
-        keep = np.zeros_like(boot)
-        if x1 > x0 and y1 > y0:
-            keep[y0:y1, x0:x1] = boot[y0:y1, x0:x1]
+    lm = max(0, m - rx0)                              # claw/jester/pole at the
+    boot[:, :lm] = 0                                   # field edges
+    rm = max(0, min(boot.shape[1], (w - m) - rx0))
+    boot[:, rm:] = 0
+    if roi is not None:                               # candidates only in the
+        keep = np.zeros_like(boot)                    # exact ROI (the padding
+        keep[ky0 - ry0:ky1 - ry0, kx0 - rx0:kx1 - rx0] = \
+            boot[ky0 - ry0:ky1 - ry0, kx0 - rx0:kx1 - rx0]   # is context only)
         boot = keep
     boot = cv2.morphologyEx(boot, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, _, stats, cent = cv2.connectedComponentsWithStats(boot, 8)
@@ -226,10 +254,11 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
         asp = max(bw, bh) / max(1, min(bw, bh))
         if asp > cfg.boot_max_aspect or bw > cfg.boot_max_w:
             continue                          # wide/thin = aim-trajectory or UI line
-        if exclude and any((cent[i][0] - ex) ** 2 + (cent[i][1] - ey) ** 2 < er * er
+        ax, ay = cent[i][0] + rx0, cent[i][1] + ry0   # absolute centroid
+        if exclude and any((ax - ex) ** 2 + (ay - ey) ** 2 < er * er
                            for ex, ey, er in exclude):
             continue                          # blacklisted dead spot (shimmer block)
-        passing.append((cent[i], int(area), stats[i]))
+        passing.append(((ax, ay), int(area), stats[i]))
     if not passing:
         return None, gray
     # IDENTITY: the flying boot spins and always carries a BRIGHT cyan arc that
@@ -243,12 +272,13 @@ def find_boot(panel_bgr, prev_gray, cfg, roi=None, gray=None, min_area=None,
     arc = ((motion > 0) & (hh >= cfg.boot_arc_h_lo) & (hh <= cfg.boot_arc_h_hi) &
            (ss >= cfg.boot_arc_s_min) & (vv >= cfg.boot_arc_v_min))
     pad = cfg.boot_arc_pad
+    ch, cw = arc.shape
     with_arc = []
-    for c, area, st in passing:
+    for c, area, st in passing:                       # st is in CROP coords
         x0 = max(0, st[0] - pad)
         y0 = max(0, st[1] - pad)
-        x1 = min(w, st[0] + st[2] + pad)
-        y1 = min(h, st[1] + st[3] + pad)
+        x1 = min(cw, st[0] + st[2] + pad)
+        y1 = min(ch, st[1] + st[3] + pad)
         if int(arc[y0:y1, x0:x1].sum()) >= cfg.boot_arc_min:
             with_arc.append((c, area))
     if not with_arc:

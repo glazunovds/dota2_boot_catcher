@@ -132,7 +132,16 @@ class Config:
     # but dividing a relock residual by one 36ms tick injected up to 5956 px/s
     # and coasted the track to y=3439 - clamping + freezing removed every
     # out-of-field runaway offline with zero good relocks rejected).
-    boot_vmax: float = 1500.0         # clamp smoothed |velocity| (px/s)
+    boot_vmax: float = 4000.0         # clamp smoothed |velocity| (px/s). Sized
+                                      # for 60fps play: game speed == render fps,
+                                      # so the boot runs ~3x its 20fps speeds
+                                      # (measured max ~1300 at 15-20fps). The old
+                                      # 1500 clamp SATURATED at 45-60fps and made
+                                      # the prediction trail the boot (0.5s blind
+                                      # gaps). Garbage velocities can't happen
+                                      # anymore - only arc-verified boot dets
+                                      # feed the tracker - so this is just an
+                                      # insanity guard now.
     boot_freeze_lost: int = 4         # stop coasting (hold position) after this
                                       # many fresh lost frames
     frame_stale_eps: float = 0.05     # mean gray absdiff below this = the game
