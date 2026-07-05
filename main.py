@@ -556,23 +556,32 @@ def click_play(region, cfg):
     log(f"  clicked PLAY at ({x},{y}); kbFocus={foc}")
 
 
-def wait_ready(region, cfg):
+def wait_ready(region, cfg, require_dip=False):
     """Wait until the field is saturated (rendered) AND a cart is visible,
     i.e. a level is ready for input. Clicks PLAY if it sees the intro/menu.
-    Returns True, or False on timeout/stop."""
+    Returns True, or False on timeout/stop.
+
+    `require_dip`: a level was just WON but its level-end fade hadn't started
+    yet - the old level is still fully rendered, so a naive READY fires ~0.8s
+    after the breakthrough and the throw lands in the fade-out. Require one
+    genuine loading dip (sat < sat_ended) before accepting READY; every real
+    new level is preceded by one."""
     period = 1.0 / max(1.0, cfg.poll_hz)
     deadline = time.time() + cfg.ready_timeout
     intro_since = None
     last_click = 0.0
+    saw_dip = not require_dip
     prev_gray = detect.to_gray(grab_region(region))   # prime motion baseline
     while running and time.time() < deadline:
         field = grab_region(region)
         sat = detect.scene_saturation(field)
         cart = detect.find_cart_x(field, cfg)
         boot, prev_gray = detect.find_boot(field, prev_gray, cfg)
+        if sat < cfg.sat_ended:
+            saw_dip = True
         # Ready to lock only if a level is rendered, the cart is visible, and no
         # boot is still in flight (otherwise we'd lock/throw mid-bounce).
-        if sat >= cfg.sat_ready and cart is not None and boot is None:
+        if saw_dip and sat >= cfg.sat_ready and cart is not None and boot is None:
             time.sleep(cfg.settle_delay)
             snap(region, cfg, "ready")
             log(f"  READY (sat={sat:.0f} cart={cart})")
@@ -609,14 +618,13 @@ def play_level(region, cfg, verbose):
         # The level ended/transitioned while we were positioning - bail so we
         # don't lock/throw into a loading screen.
         log(f"  aborting boot: scene changed (sat={s:.0f})")
-        return
+        return False
     # 1.5) If a boot is ALREADY airborne (the game auto-served, or one carried
     # over from a just-cleared level), pressing Space mis-fires the throw - skip
     # straight to catching it. (This is the 'Space while boot midair' case.)
     if boot_in_flight(region, cfg):
         log("  boot already airborne - catching without a throw")
-        catch_phase(region, cfg)
-        return
+        return catch_phase(region, cfg)
     # 2) lock + throw: exactly TWO Space presses (lock, then throw), then watch.
     # NO launch confirmation: run_20260704c proved the confirm loop is worse
     # than useless - the real throw happens on press 1-2 and the boot flies
@@ -632,13 +640,15 @@ def play_level(region, cfg, verbose):
     tap('space', cfg.space_hold)
     time.sleep(cfg.post_lock_delay)
     if not running:
-        return
+        return False
     snap(region, cfg, "space")
     log("  Space (throw) - catching")
     tap('space', cfg.space_hold)
 
-    # 3) catch phase: follow the boot with the cart until it's gone
-    catch_phase(region, cfg)
+    # 3) catch phase: follow the boot with the cart until it's gone. Returns
+    # True when a breakthrough was recognized whose level-end fade is still
+    # pending - the caller must see the dip before the next READY.
+    return catch_phase(region, cfg)
 
 
 def boot_in_flight(region, cfg, window=0.4):
@@ -781,6 +791,7 @@ def catch_phase(region, cfg):
     seen = 0                         # consecutive accepted dets (tracker age)
     ever_seen = False
     breakthrough = False             # boot exited the TOP = level complete
+    ended_by_dip = False             # phase ended because the level-end fade was seen
     det_hist = []                    # consecutive accepted dets (t, x, y) for the
                                      # impossible-track breakers
     blacklist = []                   # (x, y, t_until) dead spots find_boot must skip
@@ -800,6 +811,7 @@ def catch_phase(region, cfg):
         sat = detect.scene_saturation(panel)
         if sat < cfg.sat_ended:                       # level ended (loading dip)
             log(f"  catch: level ended (loading dip){' after breakthrough' if breakthrough else ''}")
+            ended_by_dip = True
             break
 
         # 0) Stale-capture check: the bot polls ~28/s but the game renders at
@@ -1021,7 +1033,11 @@ def catch_phase(region, cfg):
             f.write("# --- boot ---\n")
             for r in _tel:
                 f.write(",".join(str(x) for x in r) + "\n")
-    return breakthrough
+    # A recognized breakthrough whose level-end fade has NOT yet been seen means
+    # a transition is coming: the caller must wait for the sat<sat_ended dip
+    # before trusting the next READY (else it throws into the fade-out - that
+    # was 12 wasted Space pairs and ~53s per session).
+    return breakthrough and not ended_by_dip
 
 
 def main_loop(cfg, verbose):
@@ -1069,10 +1085,12 @@ def main_loop(cfg, verbose):
                          # the dropped-keys signature (Dota lost input focus, e.g.
                          # a Steam overlay popup) - Space silently does nothing,
                          # the game sits on a static serve screen forever
+    need_dip = False     # a just-won level's fade hasn't been seen yet
     while running:
-        if not wait_ready(region, cfg):
+        if not wait_ready(region, cfg, require_dip=need_dip):
             if running:
                 log("  no ready level detected (timeout) - re-locating...")
+                need_dip = False       # don't chain the dip demand across recovery
                 new_region = get_panel_region(cfg)
                 if new_region is not None:
                     region = new_region
@@ -1099,7 +1117,7 @@ def main_loop(cfg, verbose):
             focus_prompted = True
         shot += 1
         log(f"[boot {shot}] lock -> throw -> catch")
-        play_level(region, cfg, verbose)
+        need_dip = bool(play_level(region, cfg, verbose))
         # Keys-dead watchdog. Two blind cycles happen normally after a level
         # transition (serve animation eats the presses); three+ in a row means
         # the keys aren't reaching Dota at all.
